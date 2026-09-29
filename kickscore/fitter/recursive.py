@@ -5,6 +5,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..kernel import Kernel
+from ._kernel_cache import KernelCache
 from .fitter import Fitter
 
 
@@ -67,6 +68,9 @@ class RecursiveFitter(Fitter):
 
     def allocate(self) -> None:
         """Overrides `Fitter.allocate` to allocate the SSM-related matrices."""
+        self._allocate(KernelCache(self.kernel))
+
+    def _allocate(self, cache: KernelCache) -> None:
         n_new = len(self.ts_new)
         if n_new == 0:
             return
@@ -78,8 +82,9 @@ class RecursiveFitter(Fitter):
         self.ns = np.concatenate((self.ns, zeros))
         self.xs = np.concatenate((self.xs, zeros))
         # Initialize the predictive, filtering and smoothing distributions.
-        mean = np.array([self.kernel.state_mean(t) for t in self.ts_new])
-        cov = np.array([self.kernel.state_cov(t) for t in self.ts_new])
+        states = [cache.state(t) for t in self.ts_new]
+        mean = np.array([state[0] for state in states])
+        cov = np.array([state[1] for state in states])
         self._m_p = np.concatenate((self._m_p, mean))
         self._P_p = np.concatenate((self._P_p, cov))
         self._m_f = np.concatenate((self._m_f, mean))
@@ -94,8 +99,7 @@ class RecursiveFitter(Fitter):
             if i == 0:
                 # Very first sample, no need to compute anything.
                 continue
-            self._A[i - 1] = self.kernel.transition(self.ts[i - 1], self.ts[i])
-            self._Q[i - 1] = self.kernel.noise_cov(self.ts[i - 1], self.ts[i])
+            self._A[i - 1], self._Q[i - 1] = cache.step(self.ts[i - 1], self.ts[i])
         # Clear the list of pending samples.
         self.ts_new = list()
 
