@@ -10,7 +10,8 @@ from ..item import Item
 
 class Observation(metaclass=abc.ABCMeta):
     def __init__(self, elems: Sequence[tuple[Item, float]], t: float):
-        assert len(elems) > 0, "need at least one item per observation"
+        if len(elems) == 0:
+            raise ValueError("need at least one item per observation")
         self._M = len(elems)
         self._items = np.zeros(self._M, dtype=object)
         self._coeffs = np.zeros(self._M, dtype=float)

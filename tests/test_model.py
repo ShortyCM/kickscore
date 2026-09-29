@@ -62,6 +62,20 @@ def test_add_item_twice():
         model.add_item("x", kernel)
 
 
+@pytest.mark.parametrize("count", [-1, 1.5, True])
+def test_count_must_be_non_negative_integer(count: object):
+    model = ks.CountModel()
+    model.add_item("x", ks.kernel.Constant(1.0))
+    with pytest.raises(ValueError, match="non-negative integer"):
+        model.observe(["x"], [], count=count)  # pyright: ignore[reportArgumentType]
+
+
+def test_observation_must_contain_an_item():
+    model = ks.BinaryModel()
+    with pytest.raises(ValueError, match="at least one item"):
+        model.observe([], [], t=0.0)
+
+
 def test_saving():
     """Serializing a large(-ish) model with pickle should work."""
     random.seed(0)
