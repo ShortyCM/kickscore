@@ -73,7 +73,12 @@ class BatchFitter(Fitter):
             return (np.zeros_like(ts), self.kernel.k_diag(ts))
         # (3.60) and (3.61) in the GPML book.
         k_mat1 = self.kernel.k_mat(ts, self.ts)
-        k_mat2 = self.kernel.k_mat(ts, ts)
         mean = np.dot(k_mat1, self._woodbury_vec)  # pyright: ignore[reportArgumentType]
-        cov = k_mat2 - k_mat1.dot(self._woodbury_inv).dot(k_mat1.T)  # pyright: ignore[reportArgumentType, reportCallIssue]
-        return (mean, np.diag(cov))
+        # Only the marginal variances are returned, so avoid constructing the
+        # full len(ts)-by-len(ts) posterior covariance matrix.
+        correction = np.einsum(
+            "ij,ij->i",
+            k_mat1.dot(self._woodbury_inv),  # pyright: ignore[reportArgumentType, reportCallIssue]
+            k_mat1,
+        )
+        return (mean, self.kernel.k_diag(ts) - correction)

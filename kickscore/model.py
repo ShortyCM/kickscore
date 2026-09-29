@@ -240,7 +240,8 @@ class CountModel(Model):
         count: int,
         t: float = 0.0,
     ) -> None:
-        assert isinstance(count, int) and count >= 0
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("count must be a non-negative integer")
         if t < self.last_t:
             raise ValueError("observations must be added in chronological order")
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
@@ -250,14 +251,17 @@ class CountModel(Model):
 
     def probabilities(
         self,
-        items1: dict[str, Any],
-        items2: dict[str, Any],
+        items1: dict[str, Any] | list[str],
+        items2: dict[str, Any] | list[str],
         t: float = 0.0,
     ) -> tuple[float, ...]:
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
-        probs = list()
-        while sum(probs) < 0.999:
-            probs.append(PoissonObservation.probability(items, count=len(probs), t=t))
+        probs: list[float] = []
+        cumulative = 0.0
+        while cumulative < 0.999:
+            prob = PoissonObservation.probability(items, count=len(probs), t=t)
+            probs.append(prob)
+            cumulative += prob
         return tuple(probs)
 
 
@@ -288,9 +292,15 @@ class CountDiffModel(Model):
     ) -> tuple[float, ...]:
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
         k = 0
-        probs = [SkellamObservation.probability(items, k, self._base_rate, t=t)]
-        while sum(probs) < 0.999:
+        center = SkellamObservation.probability(items, k, self._base_rate, t=t)
+        negative: list[float] = []
+        positive: list[float] = []
+        cumulative = center
+        while cumulative < 0.999:
             k += 1
-            probs.append(SkellamObservation.probability(items, k, self._base_rate, t=t))
-            probs.insert(0, SkellamObservation.probability(items, -k, self._base_rate, t=t))
-        return tuple(probs)
+            pos_prob = SkellamObservation.probability(items, k, self._base_rate, t=t)
+            neg_prob = SkellamObservation.probability(items, -k, self._base_rate, t=t)
+            positive.append(pos_prob)
+            negative.append(neg_prob)
+            cumulative += pos_prob + neg_prob
+        return (*reversed(negative), center, *positive)

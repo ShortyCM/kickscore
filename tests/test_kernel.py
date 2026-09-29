@@ -132,12 +132,13 @@ def test_ssm_variance(kernel: Kernel):
 
 
 @pytest.mark.parametrize("kernel", KERNEL.values())
-def test_ssm_matrices(kernel: Kernel):
+def test_ssm_matrices(kernel: Kernel, capsys: pytest.CaptureFixture[str]):
     """`transition` and `noise_cov` should match the numerical solution.`"""
     deltas = [0.01, 1.0, 10.0]
     for delta in deltas:
         assert np.allclose(Kernel.transition(kernel, 0.0, delta), kernel.transition(0.0, delta))
         assert np.allclose(Kernel.noise_cov(kernel, 0.0, delta), kernel.noise_cov(0.0, delta))
+    assert capsys.readouterr().out == ""
 
 
 def test_simulate_constant():

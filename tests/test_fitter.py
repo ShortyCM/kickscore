@@ -171,3 +171,26 @@ def test_no_data(fitter: Fitter):
     assert fitter.ep_log_likelihood_contrib == 0
     if isinstance(fitter, RecursiveFitter):
         assert fitter.kl_log_likelihood_contrib == 0
+
+
+def test_batch_prediction_does_not_build_test_covariance():
+    """Batch prediction should compute only the requested marginal variances."""
+    kernel = Matern32(var=2.0, lscale=1.0)
+    fitter = BatchFitter(kernel)
+    for t in DATA["ts_train"]:  # pyright: ignore[reportGeneralTypeIssues]
+        fitter.add_sample(t)
+    fitter.allocate()
+    fitter.fit()
+
+    calls: list[tuple[int, int | None]] = []
+    original_k_mat = kernel.k_mat
+
+    def tracked_k_mat(ts1: np.ndarray, ts2: np.ndarray | None = None) -> np.ndarray:
+        calls.append((len(ts1), None if ts2 is None else len(ts2)))
+        return original_k_mat(ts1, ts2)
+
+    kernel.k_mat = tracked_k_mat  # pyright: ignore[reportAttributeAccessIssue, reportMethodAssignment]
+    query = np.linspace(0.0, 2.0, 100)
+    fitter.predict(query)
+
+    assert calls == [(len(query), len(fitter.ts))]
