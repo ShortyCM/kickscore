@@ -1,7 +1,12 @@
 import abc
 from collections.abc import Sequence
+from math import isfinite
 from typing import Any, Literal
 
+import numpy as np
+
+from .fitter import Fitter, RecursiveFitter
+from .fitter._kernel_cache import KernelCache
 from .item import Item
 from .kernel import Kernel
 from .observation import (
@@ -14,6 +19,7 @@ from .observation import (
     ProbitWinObservation,
     SkellamObservation,
 )
+from .observation._batch import ObservationBatch
 
 
 class Model(metaclass=abc.ABCMeta):
@@ -56,22 +62,49 @@ class Model(metaclass=abc.ABCMeta):
         else:
             raise ValueError("'method' should be one of: 'ep', 'kl'")
         self._last_method = method
-        for item in self._item.values():
-            item.fitter.allocate()
-        for i in range(max_iter):
-            max_diff = 0.0
-            # Recompute the Gaussian pseudo-observations.
-            for obs in self.observations:
-                diff = update(obs)
-                max_diff = max(max_diff, diff)
-            # Recompute the posterior of the score processes.
-            for item in self.item.values():
-                item.fitter.fit()
-            if verbose:
-                print("iteration {}, max diff: {:.5f}".format(i + 1, max_diff), flush=True)
-            if max_diff < tol:
-                return True
-        return False  # Did not converge after `max_iter`.
+        fitters: list[Fitter] = [item.fitter for item in self._item.values()]
+        caches: dict[int, KernelCache] = {}
+        try:
+            for fitter in fitters:
+                if type(fitter) is RecursiveFitter:
+                    key = id(fitter.kernel)
+                    if key not in caches:
+                        caches[key] = KernelCache(fitter.kernel)
+                    fitter._allocate(caches[key])
+                else:
+                    fitter.allocate()
+            caches.clear()
+            batch = ObservationBatch.create(self.observations, fitters)
+            for i in range(max_iter):
+                for fitter in fitters:
+                    if not all(
+                        np.isfinite(a).all() for a in (fitter.ms, fitter.vs, fitter.ns, fitter.xs)
+                    ) or np.any(fitter.vs <= 0):
+                        raise FloatingPointError("invalid score distribution or pseudo-observation")
+                max_diff = 0.0
+                if batch is not None:
+                    max_diff = batch.update(method, lr)
+                else:
+                    for obs in self.observations:
+                        diff = update(obs)
+                        if not isfinite(diff):
+                            raise FloatingPointError("non-finite convergence difference")
+                        max_diff = max(max_diff, diff)
+                for fitter in fitters:
+                    fitter.fit()
+                    if not (np.isfinite(fitter.ms).all() and np.isfinite(fitter.vs).all()):
+                        raise FloatingPointError("non-finite fitted score distribution")
+                    if np.any(fitter.vs <= 0):
+                        raise FloatingPointError("non-positive fitted score variance")
+                if verbose:
+                    print("iteration {}, max diff: {:.5f}".format(i + 1, max_diff), flush=True)
+                if max_diff < tol:
+                    return True
+            return False
+        except Exception:
+            for fitter in fitters:
+                fitter.is_fitted = False
+            raise
 
     @abc.abstractmethod
     def probabilities(self, *args: Any, **kwargs: Any) -> Any:

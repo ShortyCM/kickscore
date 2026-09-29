@@ -6,7 +6,7 @@ import numpy as np
 
 from ..item import Item
 from .observation import Observation
-from .utils import cvi_expectations, logphi, logsumexp2, match_moments, normcdf, normpdf
+from .utils import SQRT2PI, cvi_expectations, logphi, logsumexp2, match_moments
 
 
 @numba.jit(nopython=True)
@@ -46,17 +46,20 @@ class ProbitWinObservation(Observation):
 
 @numba.jit(nopython=True)
 def _mm_probit_tie(mean_cav: float, cov_cav: float, margin: float) -> tuple[float, float, float]:
-    # TODO This is probably numerically unstable.
+    if margin <= 0:
+        raise ValueError("tie margin must be positive")
     denom = sqrt(1 + cov_cav)
-    z1 = (mean_cav + margin) / denom
-    z2 = (mean_cav - margin) / denom
-    Phi1 = normcdf(z1)
-    Phi2 = normcdf(z2)
-    v1 = normpdf(z1)
-    v2 = normpdf(z2)
-    logpart = log(Phi1 - Phi2)
-    dlogpart = (v1 - v2) / (denom * (Phi1 - Phi2))
-    d2logpart = (-z1 * v1 + z2 * v2) / ((1 + cov_cav) * (Phi1 - Phi2)) - dlogpart**2
+    z1 = (-abs(mean_cav) + margin) / denom
+    z2 = (-abs(mean_cav) - margin) / denom
+    logcdf1 = logphi(z1)[0]
+    logcdf2 = logphi(z2)[0]
+    logpart = logcdf1 + log(-expm1(logcdf2 - logcdf1))
+    v1 = exp(-0.5 * z1 * z1 - log(SQRT2PI) - logpart)
+    v2 = exp(-0.5 * z2 * z2 - log(SQRT2PI) - logpart)
+    dlogpart = (v1 - v2) / denom
+    d2logpart = (-z1 * v1 + z2 * v2) / (1 + cov_cav) - dlogpart**2
+    if mean_cav > 0:
+        dlogpart = -dlogpart
     return logpart, dlogpart, d2logpart
 
 
@@ -88,6 +91,8 @@ class ProbitTieObservation(Observation):
 
     @staticmethod
     def probability(elems: Sequence[tuple[Item, float]], t: float, margin: float = 0) -> float:
+        if margin == 0:
+            return 0.0
         m, v = Observation.f_params(elems, t)
         logpart, _, _ = _mm_probit_tie(m, v, margin)
         return exp(logpart)
@@ -108,32 +113,31 @@ CS = np.array(
 
 @numba.jit(nopython=True)
 def _mm_logit_win(mean_cav: float, cov_cav: float) -> tuple[float, float, float]:
-    # Adapted from the GPML function `likLogistic.m`.
-    # First use a scale mixture.
-    arr1, arr2, arr3 = np.zeros(5), np.zeros(5), np.zeros(5)
-    for i, x in enumerate(LAMBDAS):
-        arr1[i], arr2[i], arr3[i] = _mm_probit_win(x * mean_cav, x * x * cov_cav)
-    logpart1 = logsumexp2(arr1, CS)
-    dlogpart1 = np.dot(np.exp(arr1) * arr2, CS * LAMBDAS) / np.dot(np.exp(arr1), CS)
-    d2logpart1 = (
-        np.dot(np.exp(arr1) * (arr2 * arr2 + arr3), CS * LAMBDAS * LAMBDAS)
-        / np.dot(np.exp(arr1), CS)
-    ) - (dlogpart1 * dlogpart1)
-    # Tail decays linearly in the log domain (and not quadratically).
     exponent = -10.0 * (abs(mean_cav) - (196.0 / 200.0) * cov_cav - 4.0)
     if exponent < 500:
         lambd = 1.0 / (1.0 + exp(exponent))
         logpart2 = min(cov_cav / 2.0 - abs(mean_cav), -0.1)
         dlogpart2 = 1.0
         if mean_cav > 0:
-            logpart2 = log(1 - exp(logpart2))
+            logpart2 = log1p(-exp(logpart2))
             dlogpart2 = 0.0
-        d2logpart2 = 0.0
+        if lambd == 1.0:
+            return logpart2, dlogpart2, 0.0
     else:
-        lambd, logpart2, dlogpart2, d2logpart2 = 0.0, 0.0, 0.0, 0.0
+        lambd, logpart2, dlogpart2 = 0.0, 0.0, 0.0
+    arr1, arr2, arr3 = np.empty(5), np.empty(5), np.empty(5)
+    for i, x in enumerate(LAMBDAS):
+        arr1[i], arr2[i], arr3[i] = _mm_probit_win(x * mean_cav, x * x * cov_cav)
+    logpart1 = logsumexp2(arr1, CS)
+    weights = np.exp(arr1 - np.max(arr1))
+    denom = np.dot(weights, CS)
+    dlogpart1 = np.dot(weights * arr2, CS * LAMBDAS) / denom
+    d2logpart1 = (np.dot(weights * (arr2 * arr2 + arr3), CS * LAMBDAS * LAMBDAS) / denom) - (
+        dlogpart1 * dlogpart1
+    )
     logpart = (1 - lambd) * logpart1 + lambd * logpart2
     dlogpart = (1 - lambd) * dlogpart1 + lambd * dlogpart2
-    d2logpart = (1 - lambd) * d2logpart1 + lambd * d2logpart2
+    d2logpart = (1 - lambd) * d2logpart1
     return logpart, dlogpart, d2logpart
 
 
