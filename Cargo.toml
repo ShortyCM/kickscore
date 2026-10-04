@@ -1,0 +1,21 @@
+[package]
+name = "kickscore-native"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27", features = ["extension-module"] }
+libm = "0.2"
+smallvec = { version = "1.15", features = ["const_generics", "serde"] }
+serde = { version = "1", features = ["derive", "rc"] }
+bincode = "1.3"
+rand = "0.9"
+rand_distr = "0.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

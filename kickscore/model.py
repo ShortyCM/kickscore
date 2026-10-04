@@ -1,12 +1,8 @@
 import abc
 from collections.abc import Sequence
-from math import isfinite
 from typing import Any, Literal
 
-import numpy as np
-
-from .fitter import Fitter, RecursiveFitter
-from .fitter._kernel_cache import KernelCache
+from ._native import NativeModel
 from .item import Item
 from .kernel import Kernel
 from .observation import (
@@ -19,15 +15,15 @@ from .observation import (
     ProbitWinObservation,
     SkellamObservation,
 )
-from .observation._batch import ObservationBatch
 
 
 class Model(metaclass=abc.ABCMeta):
     def __init__(self):
         self._item: dict[str, Item] = dict()
-        self.last_t: float = -float("inf")
+        self._native = NativeModel()
         self.observations: list[Observation] = list()
-        self._last_method: Literal["ep", "kl"] | None = None  # Last method used to fit the model.
+        self._last_method: Literal["ep", "kl"] | None = None
+        self._registered_observations = ()
 
     @property
     def item(self) -> dict[str, Item]:
@@ -42,6 +38,7 @@ class Model(metaclass=abc.ABCMeta):
         if name in self._item:
             raise ValueError("item '{}' already added".format(name))
         self._item[name] = Item(kernel=kernel, fitter=fitter)
+        self._native.register_fitter(self._item[name].fitter._native)
 
     @abc.abstractmethod
     def observe(self, *args: Any, **kwargs: Any) -> None:
@@ -55,56 +52,50 @@ class Model(metaclass=abc.ABCMeta):
         max_iter: int = 100,
         verbose: bool = False,
     ) -> bool:
-        if method == "ep":
-            update = lambda obs: obs.ep_update(lr=lr)
-        elif method == "kl":
-            update = lambda obs: obs.kl_update(lr=lr)
-        else:
+        if method not in ("ep", "kl"):
             raise ValueError("'method' should be one of: 'ep', 'kl'")
         self._last_method = method
-        fitters: list[Fitter] = [item.fitter for item in self._item.values()]
-        caches: dict[int, KernelCache] = {}
-        try:
-            for fitter in fitters:
-                if type(fitter) is RecursiveFitter:
-                    key = id(fitter.kernel)
-                    if key not in caches:
-                        caches[key] = KernelCache(fitter.kernel)
-                    fitter._allocate(caches[key])
-                else:
-                    fitter.allocate()
-            caches.clear()
-            batch = ObservationBatch.create(self.observations, fitters)
-            for i in range(max_iter):
-                for fitter in fitters:
-                    if not all(
-                        np.isfinite(a).all() for a in (fitter.ms, fitter.vs, fitter.ns, fitter.xs)
-                    ) or np.any(fitter.vs <= 0):
-                        raise FloatingPointError("invalid score distribution or pseudo-observation")
-                max_diff = 0.0
-                if batch is not None:
-                    max_diff = batch.update(method, lr)
-                else:
-                    for obs in self.observations:
-                        diff = update(obs)
-                        if not isfinite(diff):
-                            raise FloatingPointError("non-finite convergence difference")
-                        max_diff = max(max_diff, diff)
-                for fitter in fitters:
-                    fitter.fit()
-                    if not (np.isfinite(fitter.ms).all() and np.isfinite(fitter.vs).all()):
-                        raise FloatingPointError("non-finite fitted score distribution")
-                    if np.any(fitter.vs <= 0):
-                        raise FloatingPointError("non-positive fitted score variance")
-                if verbose:
-                    print("iteration {}, max diff: {:.5f}".format(i + 1, max_diff), flush=True)
-                if max_diff < tol:
-                    return True
-            return False
-        except Exception:
-            for fitter in fitters:
-                fitter.is_fitted = False
-            raise
+        allowed = (GaussianObservation, LogitTieObservation, LogitWinObservation, PoissonObservation, ProbitTieObservation, ProbitWinObservation, SkellamObservation)
+        for obs in self.observations:
+            if type(obs) not in allowed or any(name in vars(obs) for name in ("ep_update", "kl_update", "match_moments", "cvi_expectations")):
+                self._native.reject_override()
+        for item in self.item.values():
+            if "fit" in vars(item.fitter):
+                self._native.reject_override()
+        self._sync_observations()
+        return self._native.fit(method, lr, tol, max_iter, verbose)
+
+    def _sync_observations(self):
+        current = tuple(obs._native for obs in self.observations)
+        if current != self._registered_observations:
+            self._native.set_observations(current)
+            self._registered_observations = current
+
+    @property
+    def last_t(self):
+        return self._native.last_t
+
+    @last_t.setter
+    def last_t(self, value):
+        self._native.last_t = value
+
+    def __getstate__(self):
+        data = dict(self.__dict__)
+        data.pop("_native")
+        data.pop("_registered_observations")
+        data["_saved_last_t"] = self.last_t
+        return data
+
+    def __setstate__(self, data):
+        last_t = data.pop("_saved_last_t")
+        self.__dict__.update(data)
+        self._native = NativeModel()
+        self._registered_observations = ()
+        self.last_t = last_t
+        self._native.set_method(self._last_method != "ep")
+        for item in self.item.values():
+            self._native.register_fitter(item.fitter._native)
+        self._sync_observations()
 
     @abc.abstractmethod
     def probabilities(self, *args: Any, **kwargs: Any) -> Any:
@@ -112,14 +103,8 @@ class Model(metaclass=abc.ABCMeta):
 
     @property
     def log_likelihood(self) -> float:
-        """Estimate of log-marginal likelihood of the model."""
-        if self._last_method == "ep":
-            contrib = lambda x: x.ep_log_likelihood_contrib
-        else:  # self._last_method == "kl"
-            contrib = lambda x: x.kl_log_likelihood_contrib
-        return sum(contrib(o) for o in self.observations) + sum(
-            contrib(i.fitter) for i in self.item.values()
-        )
+        self._sync_observations()
+        return self._native.likelihood()
 
     def process_items(
         self,
@@ -140,7 +125,6 @@ class Model(metaclass=abc.ABCMeta):
         figsize: float | None = None,
         timestamps: bool = False,
     ) -> Any:
-        # Delayed import in order to avoid a hard dependency on Matplotlib.
         from .plotting import plot_scores
 
         return plot_scores(self, items, resolution, figsize, timestamps)
@@ -289,13 +273,7 @@ class CountModel(Model):
         t: float = 0.0,
     ) -> tuple[float, ...]:
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
-        probs: list[float] = []
-        cumulative = 0.0
-        while cumulative < 0.999:
-            prob = PoissonObservation.probability(items, count=len(probs), t=t)
-            probs.append(prob)
-            cumulative += prob
-        return tuple(probs)
+        return tuple(self._native.count_probabilities([item.fitter._native for item, coeff in items], [float(coeff) for item, coeff in items], t, False, 0.0))
 
 
 class CountDiffModel(Model):
@@ -324,16 +302,4 @@ class CountDiffModel(Model):
         t: float = 0.0,
     ) -> tuple[float, ...]:
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
-        k = 0
-        center = SkellamObservation.probability(items, k, self._base_rate, t=t)
-        negative: list[float] = []
-        positive: list[float] = []
-        cumulative = center
-        while cumulative < 0.999:
-            k += 1
-            pos_prob = SkellamObservation.probability(items, k, self._base_rate, t=t)
-            neg_prob = SkellamObservation.probability(items, -k, self._base_rate, t=t)
-            positive.append(pos_prob)
-            negative.append(neg_prob)
-            cumulative += pos_prob + neg_prob
-        return (*reversed(negative), center, *positive)
+        return tuple(self._native.count_probabilities([item.fitter._native for item, coeff in items], [float(coeff) for item, coeff in items], t, True, self._base_rate))

@@ -4,3 +4,9 @@
 
 # Coverage information.
 /.coverage
+
+/target/
+/.venv-rust/
+/.venv-reference/
+/reference-*.json
+/native-*.json
