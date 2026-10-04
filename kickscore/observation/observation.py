@@ -61,7 +61,14 @@ class Observation(metaclass=abc.ABCMeta):
         return data
 
     def __setstate__(self, data):
-        values, arrays = data.pop("_state")
+        data = dict(data)
+        if "_state" in data:
+            values, arrays = data.pop("_state")
+        else:
+            p = data.pop("_margin", data.pop("_diff", data.pop("_count", 0.0)))
+            q = data.pop("_var", data.pop("_base_rate", 0.0))
+            values = (p, q, data.pop("t"), data.pop("_logpart"), data.pop("_exp_ll"))
+            arrays = [np.asarray(data.pop(name)).tolist() for name in ("_coeffs", "_indices", "_ns_cav", "_xs_cav")]
         self.__dict__.update(data)
         p, q, t, logpart, exp_ll = values
         coeffs, indices, nc, xc = arrays

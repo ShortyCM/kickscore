@@ -1,5 +1,3 @@
-from math import sqrt
-
 from .._native import NativeKernel
 from .kernel import Kernel
 from .kernel import parameter
@@ -13,7 +11,7 @@ class Matern32(Kernel):
     lambda_ = parameter(2)
 
     def __init__(self, var, lscale):
-        self._native = NativeKernel(self._kind, [var, lscale, sqrt(3) / lscale], [], [])
+        self._native = NativeKernel(self._kind, [var, lscale], [], [])
 
     @property
     def stationary_mean(self):

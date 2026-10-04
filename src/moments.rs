@@ -50,7 +50,7 @@ fn log_iv(order:f64,z:f64)->f64{
     if z==0.0{return if order==0.0{0.0}else{f64::NEG_INFINITY};}
     if !z.is_finite(){return f64::INFINITY;}
     let mut term=order*(z/2.0).ln()-libm::lgamma(order+1.0);let mut sum=term;let logz=2.0*(z/2.0).ln();
-    let mut k:f64=1.0;loop {term+=logz-k.ln()-(order+k).ln();let max=sum.max(term);let next=max+((sum-max).exp()+(term-max).exp()).ln();if next==sum{return sum;}sum=next;k+=1.0;}
+    let mut k:f64=1.0;loop {term+=logz-k.ln()-(order+k).ln();let max=sum.max(term);let next=max+((sum-max).exp()+(term-max).exp()).ln();if next>f64::MAX.ln(){return f64::INFINITY;}if next==sum{return sum;}if next.is_nan(){return f64::NAN;}sum=next;k+=1.0;}
 }
 #[pyfunction]
 pub fn iv(order:f64,z:f64)->f64{log_iv(order.abs(),z).exp()}

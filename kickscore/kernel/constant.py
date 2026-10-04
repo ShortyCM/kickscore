@@ -23,7 +23,7 @@ class PiecewiseConstant(Kernel):
 
     @property
     def bounds(self):
-        return np.asarray(self._native.bounds())
+        return np.asarray(self._native.bounds_buffer())
 
     @bounds.setter
     def bounds(self, value):

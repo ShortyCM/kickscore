@@ -17,14 +17,19 @@ Contiguous growable Rust vectors hold persistent histories. Common matrix operat
 
 The numerical implementation has no BLAS, LAPACK, OpenMP, Rayon, worker threads, or thread pools. Library computations run on the calling thread. Native state objects are thread-affine. NumPy is used for Python input/output conversion and plotting, not fitting or numerical linear algebra.
 
-## Compatibility differences and limitations
+## Compatibility and validation boundaries
 
-- Built-in classes and their normal methods are implemented. Arbitrary Python kernel/observation subclasses and monkeypatched computational methods are not supported in native fitting. They must be ported to Rust. Recognized overrides are rejected explicitly, never used as a Python fallback.
-- Fitter arrays and observation cavity arrays are writable array-compatible proxies. Direct indexing/slice assignment writes Rust state. `np.asarray(proxy)` and slices produce snapshots, not writable views into live state. Mutating a NumPy snapshot does not mutate the fitter. Exact ndarray type identity, writable NumPy views, and every ndarray mutating method are not preserved. `ts_new`, kernel bounds, and private state-matrix inspection return snapshots.
-- Kernel simulation uses a Rust random generator. It is not controlled by `numpy.random.seed`, and does not reproduce NumPy's sample sequence.
-- New native models support pickle round trips, including fitted state and shared Python item references. Loading pickles produced by the Python baseline is not implemented. Native state serialization is internal to this branch, not a stable long-term file format.
-- The old private ObservationBatch implementation is replaced by the native model. Tests that monkeypatch private Python execution paths or assert Python kernel callback counts are not applicable to the native loop. They have not been deleted or silently skipped in the existing suite.
-- Gauss-Hermite nodes/weights are obtained in Rust from the order-30 Jacobi matrix. The modified Bessel function uses a log-domain positive series. These implement the same integrals but do not reproduce SciPy's algorithm bit for bit. Their numerical agreement is specifically covered by the moment stage below and is unverified.
+Fitter score/pseudo-observation arrays, observation participant/cavity arrays, and piecewise kernel bounds expose actual writable NumPy arrays backed by Rust-owned buffers. NumPy slices and `np.asarray` share their storage. An exported buffer remains alive if its owner is deleted or subsequently grows; growing a fitter detaches old exported arrays, as the baseline's concatenation did. The native loop neither copies these arrays through Python nor synchronizes Python numerical objects.
+
+Loading the baseline's Python pickle state is implemented for kernels, both fitters, all built-in observations, and models. It imports allocated/pending samples, posterior state, cavity state, and batch or recursive prediction state without refitting. New pickle round trips also retain shared item/kernel references. Both paths still need the local validation below.
+
+Simulation obtains and restores NumPy's legacy MT19937 state once per call. Random-number generation and the state-space simulation run in Rust. `numpy.random.seed` controls reproducibility. The covariance factorization is computed in Rust, so a seed does not promise bitwise identical samples to NumPy's SVD-based factorization; the covariance and Gaussian distribution are unchanged. Cross-language numerical parity is not yet established.
+
+The baseline supports arbitrary Python computational overrides. Executing those overrides in fitting conflicts with the requirement to execute the complete fitting operation in Rust without Python callbacks. Built-in methods and subclasses that inherit those methods use the native implementation. Overrides that change the computations are explicitly rejected; there is no Python fallback. This follows the explicit native-only, no-Python-callback requirement. It does not omit a built-in model, observation, or kernel, but it is an extension-hook compatibility difference rather than full compatibility with arbitrary user-defined Python code.
+
+The old private ObservationBatch implementation is replaced by native observation storage. Existing tests that specifically assert Python callback counts or monkeypatch Python execution paths do not describe the requested native loop. They have not been removed from the original suite.
+
+Gauss-Hermite nodes/weights are obtained in Rust from the order-30 Jacobi matrix. The modified Bessel function uses a log-domain positive series. These implement the same integrals but do not reproduce SciPy's algorithm bit for bit. Their numerical agreement is specifically covered by the moment stage below and remains unverified.
 
 ## Stage 1: build and install
 
@@ -104,3 +109,15 @@ Only after the earlier stages pass:
 ```
 
 This uses small deterministic cases across the model types, supported EP/KL combinations, both fitters, every kernel, Matérn combinations, a general state dimension above eight, equal timestamps, weighted teams, unused items, before/intermediate/after predictions, incremental observations, likelihoods, and pickle round trips. Each fit is four iterations with the same learning rate. Errors are captured and compared as well as numerical results. The comparator uses rtol=2e-10 and atol=2e-11, matching the baseline inference comparison tests; tolerances are not automatically relaxed. Stop on discrepancies and report the comparison output before any larger validation workload.
+
+## Baseline pickle compatibility
+
+After the model comparison passes, create the fixtures with the baseline environment, then load the same files in the Rust environment. Only load these locally generated pickle fixtures.
+
+```bat
+.venv-reference\Scripts\python.exe validation\pickle_compatibility.py --source ..\kickscore-python-reference --fixtures legacy-pickles.pkl --output reference-pickles.json --write
+.venv-rust\Scripts\python.exe validation\pickle_compatibility.py --source . --fixtures legacy-pickles.pkl --output native-pickles.json
+.venv-rust\Scripts\python.exe validation\compare.py reference-pickles.json native-pickles.json
+```
+
+This covers both fitters, all model families, unallocated observations, fitted models, pending observations after fitting, prediction state, shared references, and subsequent fitting. Report all comparator output. Use the corresponding `bin/python` paths on Linux.

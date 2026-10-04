@@ -1,3 +1,5 @@
+mod random;
+mod storage;
 mod matrix;
 mod kernel;
 mod moments;
@@ -6,6 +8,7 @@ mod observation;
 use pyo3::prelude::*;
 #[pymodule]
 fn _native(m:&Bound<'_,PyModule>)->PyResult<()>{
+    m.add_class::<storage::ArrayView>()?;
     m.add_class::<kernel::NativeKernel>()?;
     m.add_class::<fitter::NativeFitter>()?;
     m.add_class::<observation::NativeObservation>()?;

@@ -55,11 +55,11 @@ class Model(metaclass=abc.ABCMeta):
         if method not in ("ep", "kl"):
             raise ValueError("'method' should be one of: 'ep', 'kl'")
         self._last_method = method
-        allowed = (GaussianObservation, LogitTieObservation, LogitWinObservation, PoissonObservation, ProbitTieObservation, ProbitWinObservation, SkellamObservation)
         for obs in self.observations:
-            if type(obs) not in allowed or any(name in vars(obs) for name in ("ep_update", "kl_update", "match_moments", "cvi_expectations")):
+            if any(name in vars(obs) or getattr(type(obs), name) is not getattr(Observation, name) for name in ("ep_update", "kl_update", "match_moments", "cvi_expectations")):
                 self._native.reject_override()
         for item in self.item.values():
+            item.kernel._check_native_methods()
             if "fit" in vars(item.fitter):
                 self._native.reject_override()
         self._sync_observations()
@@ -87,7 +87,8 @@ class Model(metaclass=abc.ABCMeta):
         return data
 
     def __setstate__(self, data):
-        last_t = data.pop("_saved_last_t")
+        data = dict(data)
+        last_t = data.pop("_saved_last_t", data.pop("last_t", -float("inf")))
         self.__dict__.update(data)
         self._native = NativeModel()
         self._registered_observations = ()

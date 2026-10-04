@@ -1,3 +1,4 @@
+use crate::storage::{Array,ArrayView};
 use crate::{kernel::{KRef,NativeKernel},matrix::{Mat,History}};
 use pyo3::{exceptions::{PyRuntimeError,PyValueError,PyNotImplementedError},prelude::*};
 use serde::{Deserialize,Serialize};
@@ -6,19 +7,19 @@ use std::{cell::RefCell,rc::Rc,collections::HashMap};
 pub type FRef=Rc<RefCell<FData>>;
 #[derive(Serialize,Deserialize)]
 pub struct FData{
-    pub kernel:KRef,pub batch:bool,pub fitted:bool,pub ts:Vec<f64>,pub pending:Vec<f64>,pub ms:Vec<f64>,pub vs:Vec<f64>,pub ns:Vec<f64>,pub xs:Vec<f64>,
+    pub kernel:KRef,pub batch:bool,pub fitted:bool,pub ts:Array<f64>,pub pending:Array<f64>,pub ms:Array<f64>,pub vs:Array<f64>,pub ns:Array<f64>,pub xs:Array<f64>,
     pub h:Mat,pub a:History,pub q:History,pub mp:History,pub pp:History,pub mf:History,pub pf:History,pub sm:History,pub sp:History,
     pub km:Mat,pub cov:Mat,pub chol:Mat,pub wi:Mat,pub wv:Mat,
 }
 impl FData{
-    pub fn new(kernel:KRef,batch:bool)->PyResult<Self>{let h=if batch{Mat::zero(0,1)}else{kernel.borrow().h()?};let n=h.n;Ok(Self{kernel,batch,fitted:true,ts:vec![],pending:vec![],ms:vec![],vs:vec![],ns:vec![],xs:vec![],h,a:History::new(n,n),q:History::new(n,n),mp:History::new(n,1),pp:History::new(n,n),mf:History::new(n,1),pf:History::new(n,n),sm:History::new(n,1),sp:History::new(n,n),km:Mat::zero(0,0),cov:Mat::zero(0,0),chol:Mat::zero(0,0),wi:Mat::zero(0,0),wv:Mat::zero(0,1)})}
+    pub fn new(kernel:KRef,batch:bool)->PyResult<Self>{let h=if batch{Mat::zero(0,1)}else{kernel.borrow().h()?};let n=h.n;Ok(Self{kernel,batch,fitted:true,ts:Array::new(),pending:Array::new(),ms:Array::new(),vs:Array::new(),ns:Array::new(),xs:Array::new(),h,a:History::new(n,n),q:History::new(n,n),mp:History::new(n,1),pp:History::new(n,n),mf:History::new(n,1),pf:History::new(n,n),sm:History::new(n,1),sp:History::new(n,n),km:Mat::zero(0,0),cov:Mat::zero(0,0),chol:Mat::zero(0,0),wi:Mat::zero(0,0),wv:Mat::zero(0,1)})}
     pub fn add(&mut self,t:f64)->usize{let i=self.ts.len()+self.pending.len();self.pending.push(t);self.fitted=false;i}
     pub fn allocate(&mut self)->PyResult<()>{self.allocate_cached(&mut HashMap::new())}
     pub fn allocate_cached(&mut self,cache:&mut HashMap<(usize,u64),(Mat,Mat)>)->PyResult<()>{
         if self.pending.is_empty() && !self.batch{return Ok(());}
         let k=self.kernel.borrow();
         let stationary=fn_stationary(&k);
-        for &t in &self.pending {
+        for &t in self.pending.iter() {
             self.ms.push(0.0);self.vs.push(k.cov(t,t));self.ns.push(0.0);self.xs.push(0.0);
             if !self.batch {let n=self.h.n;let p=k.matrix("state",t,t)?;self.mp.push(Mat::zero(n,1));self.mf.push(Mat::zero(n,1));self.sm.push(Mat::zero(n,1));self.pp.push(p.clone());self.pf.push(p.clone());self.sp.push(p);
                 if let Some(&prev)=self.ts.last(){let key=(Rc::as_ptr(&self.kernel) as usize,(t-prev).to_bits());let(a,q)=if stationary {if let Some(step)=cache.get(&key){step.clone()}else{let step=(k.matrix("transition",prev,t)?,k.matrix("noise",prev,t)?);if cache.len()>=1024{cache.clear();}cache.insert(key,step.clone());step}}else{(k.matrix("transition",prev,t)?,k.matrix("noise",prev,t)?)};self.a.push(a);self.q.push(q);}
@@ -33,7 +34,7 @@ impl FData{
         let n=self.ts.len();if n==0{self.fitted=true;return Ok(());}
         if self.batch{
             let mut b=Mat::eye(n);let mut diag=Mat::zero(n,n);for i in 0..n{diag[(i,i)]=self.xs[i].sqrt();for j in 0..n{b[(i,j)]+=self.xs[i].sqrt()*self.xs[j].sqrt()*self.km[(i,j)];}}
-            self.chol=b.cholesky()?;let mat=self.chol.lower_solve(&diag);self.wi=mat.transpose().mul(&mat);let wik=self.wi.mul(&self.km);self.cov=self.km.sub(&self.km.mul(&wik));let ns=Mat::from(n,1,&self.ns);let m=self.cov.mul(&ns);self.ms.copy_from_slice(&m.v);for i in 0..n{self.vs[i]=self.cov[(i,i)];}self.wv=ns.sub(&wik.mul(&ns));
+            self.chol=b.cholesky()?;let mat=self.chol.lower_solve(&diag);self.wi=mat.transpose().mul(&mat);let wik=self.wi.mul(&self.km);self.cov=self.km.sub(&self.km.mul(&wik));let ns=Mat::from(n,1,&self.ns);let m=self.cov.mul(&ns);self.ms=Array::from_vec(m.v.to_vec());self.vs=Array::from_vec((0..n).map(|i|self.cov[(i,i)]).collect());self.wv=ns.sub(&wik.mul(&ns));
         }else{
             let h=&self.h;let ht=h.transpose();let id=Mat::eye(h.n);
             for i in 0..n{
@@ -54,7 +55,7 @@ impl FData{
     }
     pub fn likelihood(&self,kl:bool)->PyResult<f64>{
         if kl && self.batch{return Err(PyNotImplementedError::new_err(""));}self.ready()?;let n=self.ts.len();if n==0{return Ok(0.0);}
-        if self.batch{return Ok(-(0..n).map(|i|self.chol[(i,i)].ln()).sum::<f64>()+0.5*self.ns.iter().zip(&self.ms).map(|(a,b)|a*b).sum::<f64>());}
+        if self.batch{return Ok(-(0..n).map(|i|self.chol[(i,i)].ln()).sum::<f64>()+0.5*self.ns.iter().zip(self.ms.iter()).map(|(a,b)|a*b).sum::<f64>());}
         let mut val=0.0;for i in 0..n{let m=self.h.transpose().mul(&self.mp.get(i)).v[0];let v=self.pp.get(i).quad(&self.h);let x=self.xs[i];let u=self.ns[i];val+=if kl{-0.5*((x*v+1.0).ln()+x*(m*m-self.ms[i]*self.ms[i]-self.vs[i])-2.0*u*(m-self.ms[i])-(x*m-u).powi(2)/(1.0/v+x))}else{-0.5*((x*v+1.0).ln()+(-u*u*v-2.0*u*m+x*m*m)/(x*v+1.0))};}Ok(val)
     }
     pub fn array(&self,name:&str)->PyResult<&Vec<f64>>{Ok(match name{"ts"=>&self.ts,"ts_new"=>&self.pending,"ms"=>&self.ms,"vs"=>&self.vs,"ns"=>&self.ns,"xs"=>&self.xs,_=>return Err(PyValueError::new_err("unknown array"))})}
@@ -66,6 +67,7 @@ pub struct NativeFitter{pub inner:FRef}
 impl NativeFitter{
     #[new]
     fn new(kernel:PyRef<'_,NativeKernel>,batch:bool)->PyResult<Self>{Ok(Self{inner:Rc::new(RefCell::new(FData::new(kernel.inner.clone(),batch)?))})}
+    fn append_pending(&self,t:f64){self.inner.borrow_mut().pending.push(t);}
     fn add_sample(&self,t:f64)->usize{self.inner.borrow_mut().add(t)}
     fn allocate(&self)->PyResult<()>{self.inner.borrow_mut().allocate()}
     fn fit(&self)->PyResult<()>{self.inner.borrow_mut().fit()}
@@ -73,11 +75,23 @@ impl NativeFitter{
     fn is_allocated(&self)->bool{self.inner.borrow().pending.is_empty()}
     fn is_fitted(&self)->bool{self.inner.borrow().fitted}
     fn set_fitted(&self,v:bool){self.inner.borrow_mut().fitted=v;}
+    fn buffer(&self,name:&str)->PyResult<ArrayView>{let f=self.inner.borrow();Ok(match name{"ts"=>f.ts.view(),"ms"=>f.ms.view(),"vs"=>f.vs.view(),"ns"=>f.ns.view(),"xs"=>f.xs.view(),_=>return Err(PyValueError::new_err("unknown array"))})}
     fn get_array(&self,name:&str)->PyResult<Vec<f64>>{Ok(self.inner.borrow().array(name)?.clone())}
-    fn set_array(&self,name:&str,v:Vec<f64>)->PyResult<()>{let mut f=self.inner.borrow_mut();if name!="ts_new" && v.len()!=f.ts.len(){return Err(PyValueError::new_err("array length must match allocated samples"));}match name{"ts"=>f.ts=v,"ts_new"=>f.pending=v,"ms"=>f.ms=v,"vs"=>f.vs=v,"ns"=>f.ns=v,"xs"=>f.xs=v,_=>return Err(PyValueError::new_err("unknown array"))}Ok(())}
+    fn set_array(&self,name:&str,v:Vec<f64>)->PyResult<()>{let mut f=self.inner.borrow_mut();if name!="ts_new" && v.len()!=f.ts.len(){return Err(PyValueError::new_err("array length must match allocated samples"));}match name{"ts"=>f.ts=Array::from_vec(v),"ts_new"=>f.pending=Array::from_vec(v),"ms"=>f.ms=Array::from_vec(v),"vs"=>f.vs=Array::from_vec(v),"ns"=>f.ns=Array::from_vec(v),"xs"=>f.xs=Array::from_vec(v),_=>return Err(PyValueError::new_err("unknown array"))}Ok(())}
     fn predict(&self,ts:Vec<f64>)->PyResult<(Vec<f64>,Vec<f64>)>{let f=self.inner.borrow();f.ready()?;let mut m=Vec::with_capacity(ts.len());let mut v=Vec::with_capacity(ts.len());for t in ts{let(a,b)=f.predict(t)?;m.push(a);v.push(b);}Ok((m,v))}
     fn likelihood(&self,kl:bool)->PyResult<f64>{self.inner.borrow().likelihood(kl)}
     fn matrices(&self,name:&str)->PyResult<Vec<Vec<Vec<f64>>>>{let f=self.inner.borrow();let a=match name{"_A"=>&f.a,"_Q"=>&f.q,"_m_p"=>&f.mp,"_P_p"=>&f.pp,"_m_f"=>&f.mf,"_P_f"=>&f.pf,"_m_s"=>&f.sm,"_P_s"=>&f.sp,_=>return Err(PyValueError::new_err("unknown state"))};Ok(a.rows())}
+    fn set_matrix(&self,name:&str,values:Vec<Vec<f64>>)->PyResult<()> {
+        let mut f=self.inner.borrow_mut();let n=values.len();let m=values.first().map_or(0,Vec::len);
+        if values.iter().any(|r|r.len()!=m){return Err(PyValueError::new_err("ragged matrix"));}
+        let matrix=Mat::from(n,m,&values.into_iter().flatten().collect::<Vec<_>>());
+        match name{"_k_mat"=>f.km=matrix,"_cov"=>f.cov=matrix,"_b_cholesky"=>f.chol=matrix,"_woodbury_inv"=>f.wi=matrix,"_woodbury_vec"=>f.wv=matrix,_=>return Err(PyValueError::new_err("unknown matrix"))}Ok(())
+    }
+    fn set_history(&self,name:&str,values:Vec<Vec<f64>>)->PyResult<()> {
+        let mut f=self.inner.borrow_mut();let history=match name{"_A"=>&mut f.a,"_Q"=>&mut f.q,"_m_p"=>&mut f.mp,"_P_p"=>&mut f.pp,"_m_f"=>&mut f.mf,"_P_f"=>&mut f.pf,"_m_s"=>&mut f.sm,"_P_s"=>&mut f.sp,_=>return Err(PyValueError::new_err("unknown state"))};
+        if values.iter().any(|v|v.len()!=history.n*history.m){return Err(PyValueError::new_err("invalid state dimensions"));}
+        history.v=values.into_iter().flatten().collect();Ok(())
+    }
     fn dump(&self)->PyResult<Vec<u8>>{bincode::serialize(&*self.inner.borrow()).map_err(|e|PyValueError::new_err(e.to_string()))}
     fn restore(&self,data:Vec<u8>,kernel:PyRef<'_,NativeKernel>)->PyResult<()>{let mut f:FData=bincode::deserialize(&data).map_err(|e|PyValueError::new_err(e.to_string()))?;f.kernel=kernel.inner.clone();*self.inner.borrow_mut()=f;Ok(())}
 }

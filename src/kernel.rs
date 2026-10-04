@@ -1,11 +1,12 @@
 use crate::matrix::Mat;
+use crate::storage::{Array,ArrayView};
 use pyo3::{exceptions::{PyNotImplementedError, PyValueError}, prelude::*};
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, rc::Rc};
 
 pub type KRef=Rc<RefCell<KData>>;
 #[derive(Clone, Serialize, Deserialize)]
-pub struct KData {pub kind:String,pub p:Vec<f64>,pub bounds:Vec<f64>,pub parts:Vec<KRef>}
+pub struct KData {pub kind:String,pub p:Vec<f64>,pub bounds:Array<f64>,pub parts:Vec<KRef>}
 impl KData {
     pub fn order(&self)->PyResult<usize> {Ok(match self.kind.as_str(){"add"=>self.parts.iter().map(|k|k.borrow().order()).collect::<PyResult<Vec<_>>>()?.iter().sum(),"affine"|"matern32"=>2,"matern52"=>3,"periodic"=>return Err(PyNotImplementedError::new_err("")),_=>1})}
     pub fn cov(&self,t:f64,s:f64)->f64 {
@@ -61,25 +62,27 @@ pub struct NativeKernel {pub inner:KRef}
 #[pymethods]
 impl NativeKernel {
     #[new]
-    fn new(kind:String,p:Vec<f64>,mut bounds:Vec<f64>,parts:Vec<PyRef<'_,NativeKernel>>)->PyResult<Self> {
+    fn new(kind:String,mut p:Vec<f64>,mut bounds:Vec<f64>,parts:Vec<PyRef<'_,NativeKernel>>)->PyResult<Self> {
         if !["constant","piecewise","exponential","matern32","matern52","affine","wiener","periodic","add"].contains(&kind.as_str()){return Err(PyValueError::new_err("unknown kernel"));}
+        if (kind=="matern32"||kind=="matern52")&&p.len()==2{if p[1]==0.0{return Err(pyo3::exceptions::PyZeroDivisionError::new_err("float division by zero"));}p.push(if kind=="matern32"{3.0_f64.sqrt()/p[1]}else{5.0_f64.sqrt()/p[1]});}
         let needed=match kind.as_str(){"add"=>0,"constant"|"piecewise"=>1,"exponential"=>2,_=>3};
         if p.len()!=needed{return Err(PyValueError::new_err("invalid kernel parameters"));}bounds.sort_by(f64::total_cmp);
-        Ok(Self{inner:Rc::new(RefCell::new(KData{kind,p,bounds,parts:parts.iter().map(|k|k.inner.clone()).collect()}))})
+        Ok(Self{inner:Rc::new(RefCell::new(KData{kind,p,bounds:Array::from_vec(bounds),parts:parts.iter().map(|k|k.inner.clone()).collect()}))})
     }
     fn get_param(&self,i:usize)->PyResult<f64>{self.inner.borrow().p.get(i).copied().ok_or_else(||PyValueError::new_err("invalid parameter"))}
     fn set_param(&self,i:usize,v:f64)->PyResult<()>{let mut k=self.inner.borrow_mut();*k.p.get_mut(i).ok_or_else(||PyValueError::new_err("invalid parameter"))?=v;Ok(())}
-    fn bounds(&self)->Vec<f64>{self.inner.borrow().bounds.clone()}
-    fn set_bounds(&self,v:Vec<f64>){self.inner.borrow_mut().bounds=v;}
+    fn bounds_buffer(&self)->ArrayView{self.inner.borrow().bounds.view()}
+    fn bounds(&self)->Vec<f64>{self.inner.borrow().bounds.to_vec()}
+    fn set_bounds(&self,v:Vec<f64>){self.inner.borrow_mut().bounds=Array::from_vec(v);}
     fn order(&self)->PyResult<usize>{self.inner.borrow().order()}
     fn matrix(&self,what:&str,t:f64,s:f64)->PyResult<Vec<Vec<f64>>>{Ok(self.inner.borrow().matrix(what,t,s)?.rows())}
+    fn mean(&self)->PyResult<Vec<f64>>{Ok(vec![0.0;self.inner.borrow().order()?])}
     fn h(&self)->PyResult<Vec<f64>>{Ok(self.inner.borrow().h()?.v.to_vec())}
     fn k_mat(&self,a:Vec<f64>,b:Vec<f64>)->Vec<Vec<f64>>{let k=self.inner.borrow();a.iter().map(|t|b.iter().map(|s|k.cov(*t,*s)).collect()).collect()}
     fn k_diag(&self,a:Vec<f64>)->Vec<f64>{let k=self.inner.borrow();a.iter().map(|t|k.cov(*t,*t)).collect()}
-    fn simulate(&self,mut ts:Vec<f64>)->PyResult<Vec<f64>>{
-        use rand_distr::{Distribution,StandardNormal};
+    fn simulate(&self,py:Python<'_>,mut ts:Vec<f64>)->PyResult<Vec<f64>>{
         ts.sort_by(f64::total_cmp);if ts.is_empty(){return Err(pyo3::exceptions::PyIndexError::new_err("index 0 is out of bounds"));}
-        let k=self.inner.borrow();let h=k.h()?;let n=k.order()?;let mut x=Mat::zero(n,1);let mut out=Vec::with_capacity(ts.len());let mut rng=rand::rng();
-        for (i,t) in ts.iter().enumerate(){let cov=if i==0{k.matrix("state",*t,*t)?}else{x=k.matrix("transition",ts[i-1],*t)?.mul(&x);k.matrix("noise",ts[i-1],*t)?};let (vals,vecs)=crate::moments::eigen(cov);let z=Mat::from(n,1,&(0..n).map(|j|{let r:f64=StandardNormal.sample(&mut rng);r*vals[j].abs().sqrt()}).collect::<Vec<_>>());x=x.add(&vecs.mul(&z));out.push(h.transpose().mul(&x).v[0]);}Ok(out)
+        let k=self.inner.borrow();let h=k.h()?;let n=k.order()?;let mut x=Mat::zero(n,1);let mut out=Vec::with_capacity(ts.len());let mut rng=crate::random::RandomState::load(py)?;
+        for (i,t) in ts.iter().enumerate(){let cov=if i==0{k.matrix("state",*t,*t)?}else{x=k.matrix("transition",ts[i-1],*t)?.mul(&x);k.matrix("noise",ts[i-1],*t)?};let (vals,vecs)=crate::moments::eigen(cov);let z=Mat::from(n,1,&(0..n).map(|j|{let r=rng.normal();r*vals[j].abs().sqrt()}).collect::<Vec<_>>());x=x.add(&vecs.mul(&z));out.push(h.transpose().mul(&x).v[0]);}rng.save(py)?;Ok(out)
     }
 }

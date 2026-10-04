@@ -13,8 +13,6 @@ libm = "0.2"
 smallvec = { version = "1.15", features = ["const_generics", "serde"] }
 serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1.3"
-rand = "0.9"
-rand_distr = "0.5"
 
 [profile.release]
 lto = "thin"
