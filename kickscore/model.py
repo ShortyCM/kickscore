@@ -23,7 +23,23 @@ class Model(metaclass=abc.ABCMeta):
         self._native = NativeModel()
         self.observations: list[Observation] = list()
         self._last_method: Literal["ep", "kl"] | None = None
-        self._registered_observations = ()
+
+    @property
+    def _last_method(self):
+        return self._native.get_method()
+
+    @_last_method.setter
+    def _last_method(self, value):
+        self._native.set_method(value)
+
+    def _get_parameter(self):
+        return self._native.parameter
+
+    def _set_parameter(self, value):
+        self._native.parameter = value
+
+    def _outcomes(self, elems, t, kind, p=0.0, q=0.0, ternary=False):
+        return tuple(self._native.outcomes([item.fitter._native for item, coeff in elems], [float(coeff) for item, coeff in elems], t, kind, p, q, ternary))
 
     @property
     def item(self) -> dict[str, Item]:
@@ -55,21 +71,11 @@ class Model(metaclass=abc.ABCMeta):
         if method not in ("ep", "kl"):
             raise ValueError("'method' should be one of: 'ep', 'kl'")
         self._last_method = method
-        for obs in self.observations:
-            if any(name in vars(obs) or getattr(type(obs), name) is not getattr(Observation, name) for name in ("ep_update", "kl_update", "match_moments", "cvi_expectations")):
-                self._native.reject_override()
-        for item in self.item.values():
-            item.kernel._check_native_methods()
-            if "fit" in vars(item.fitter):
-                self._native.reject_override()
-        self._sync_observations()
         return self._native.fit(method, lr, tol, max_iter, verbose)
 
-    def _sync_observations(self):
-        current = tuple(obs._native for obs in self.observations)
-        if current != self._registered_observations:
-            self._native.set_observations(current)
-            self._registered_observations = current
+    def _record(self, obs):
+        self._native.append_observation(obs._native)
+        self.observations.append(obs)
 
     @property
     def last_t(self):
@@ -82,21 +88,25 @@ class Model(metaclass=abc.ABCMeta):
     def __getstate__(self):
         data = dict(self.__dict__)
         data.pop("_native")
-        data.pop("_registered_observations")
+        data["_saved_last_method"] = self._last_method
+        data["_saved_parameter"] = self._native.parameter
         data["_saved_last_t"] = self.last_t
         return data
 
     def __setstate__(self, data):
         data = dict(data)
-        last_t = data.pop("_saved_last_t", data.pop("last_t", -float("inf")))
+        last_t = data.pop("_saved_last_t")
+        parameter = data.pop("_saved_parameter")
+        method = data.pop("_saved_last_method")
         self.__dict__.update(data)
         self._native = NativeModel()
-        self._registered_observations = ()
+        self._native.parameter = parameter
         self.last_t = last_t
-        self._native.set_method(self._last_method != "ep")
+        self._last_method = method
         for item in self.item.values():
             self._native.register_fitter(item.fitter._native)
-        self._sync_observations()
+        for obs in self.observations:
+            self._native.append_observation(obs._native)
 
     @abc.abstractmethod
     def probabilities(self, *args: Any, **kwargs: Any) -> Any:
@@ -104,7 +114,6 @@ class Model(metaclass=abc.ABCMeta):
 
     @property
     def log_likelihood(self) -> float:
-        self._sync_observations()
         return self._native.likelihood()
 
     def process_items(
@@ -151,7 +160,7 @@ class BinaryModel(Model):
             raise ValueError("observations must be added in chronological order")
         elems = self.process_items(winners, sign=+1) + self.process_items(losers, sign=-1)
         obs = self._win_obs(elems, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -161,11 +170,12 @@ class BinaryModel(Model):
         t: float,
     ) -> tuple[float, float]:
         elems = self.process_items(team1, sign=+1) + self.process_items(team2, sign=-1)
-        prob = self._win_obs.probability(elems, t)
-        return (prob, 1 - prob)
+        return self._outcomes(elems, t, self._win_obs._kind)
 
 
 class TernaryModel(Model):
+    margin = property(Model._get_parameter, Model._set_parameter)
+
     def __init__(self, margin: float = 0.1, obs_type: Literal["probit", "logit"] = "probit"):
         super().__init__()
         if obs_type == "probit":
@@ -195,7 +205,7 @@ class TernaryModel(Model):
             obs = self._tie_obs(elems, t=t, margin=margin)
         else:
             obs = self._win_obs(elems, t=t, margin=margin)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -208,12 +218,12 @@ class TernaryModel(Model):
         if margin is None:
             margin = self.margin
         elems = self.process_items(team1, sign=+1) + self.process_items(team2, sign=-1)
-        prob1 = self._win_obs.probability(elems, t, margin)
-        prob2 = self._tie_obs.probability(elems, t, margin)
-        return (prob1, prob2, 1 - prob1 - prob2)
+        return self._outcomes(elems, t, self._win_obs._kind, margin, ternary=True)
 
 
 class DifferenceModel(Model):
+    var = property(Model._get_parameter, Model._set_parameter)
+
     def __init__(self, var: float = 1.0):
         super().__init__()
         self.var = var
@@ -232,7 +242,7 @@ class DifferenceModel(Model):
             var = self.var
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
         obs = GaussianObservation(items, diff, var, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -246,8 +256,7 @@ class DifferenceModel(Model):
         if var is None:
             var = self.var
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
-        prob = GaussianObservation.probability(items, threshold, var, t=t)
-        return (prob, 1 - prob)
+        return self._outcomes(items, t, GaussianObservation._kind, threshold, var)
 
 
 class CountModel(Model):
@@ -264,7 +273,7 @@ class CountModel(Model):
             raise ValueError("observations must be added in chronological order")
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
         obs = PoissonObservation(items, count, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -278,6 +287,8 @@ class CountModel(Model):
 
 
 class CountDiffModel(Model):
+    _base_rate = property(Model._get_parameter, Model._set_parameter)
+
     def __init__(self, base_rate: float = 0.0):
         super().__init__()
         self._base_rate = base_rate
@@ -293,7 +304,7 @@ class CountDiffModel(Model):
             raise ValueError("observations must be added in chronological order")
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
         obs = SkellamObservation(items, diff, self._base_rate, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(

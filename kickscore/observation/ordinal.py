@@ -34,7 +34,7 @@ class ProbitWinObservation(Observation):
     _margin = scalar("p")
 
     def __init__(self, elems, t, margin=0):
-        super().__init__(elems, t, margin)
+        self._initialize(elems, t, margin)
 
     @staticmethod
     def probability(elems, t, margin=0):
@@ -47,7 +47,7 @@ class LogitWinObservation(Observation):
     _margin = scalar("p")
 
     def __init__(self, elems, t, margin=0):
-        super().__init__(elems, t, margin)
+        self._initialize(elems, t, margin)
 
     @staticmethod
     def probability(elems, t, margin=0):
@@ -60,7 +60,7 @@ class ProbitTieObservation(Observation):
     _margin = scalar("p")
 
     def __init__(self, elems, t, margin):
-        super().__init__(elems, t, margin)
+        self._initialize(elems, t, margin)
 
     @staticmethod
     def probability(elems, t, margin=0):
@@ -75,7 +75,7 @@ class LogitTieObservation(Observation):
     _margin = scalar("p")
 
     def __init__(self, elems, t, margin=0):
-        super().__init__(elems, t, margin)
+        self._initialize(elems, t, margin)
 
     @staticmethod
     def probability(elems, t, margin=0):

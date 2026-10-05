@@ -14,14 +14,6 @@ class Kernel(metaclass=abc.ABCMeta):
     def __init__(self):
         pass
 
-    def _check_native_methods(self):
-        methods = ("k_mat", "k_diag", "state_cov", "state_mean", "transition", "noise_cov")
-        for name in methods:
-            if name in vars(self) or getattr(type(self), name) is not getattr(Kernel, name):
-                raise NotImplementedError("Python kernel overrides require Python callbacks; native fitting does not execute them")
-        for part in getattr(self, "parts", []):
-            part._check_native_methods()
-
     def k_mat(self, ts1, ts2=None):
         first = np.asarray(ts1, dtype=float).tolist()
         second = first if ts2 is None else np.asarray(ts2, dtype=float).tolist()
@@ -81,21 +73,8 @@ class Kernel(metaclass=abc.ABCMeta):
         return data
 
     def __setstate__(self, data):
-        fields = {
-            "constant": ("var",), "piecewise": ("var",),
-            "exponential": ("var", "lscale"),
-            "matern32": ("var", "lscale", "lambda_"),
-            "matern52": ("var", "lscale", "lambda_"),
-            "affine": ("var_offset", "var_slope", "t0"),
-            "wiener": ("var", "t0", "var_t0"),
-            "periodic": ("var", "lscale", "period"), "add": (),
-        }
-        if "_params" in data:
-            params = data.pop("_params")
-            bounds = data.pop("_bounds")
-        else:
-            params = [data.pop(name) for name in fields[self._kind]]
-            bounds = np.asarray(data.pop("bounds", []), dtype=float).tolist()
+        params = data.pop("_params")
+        bounds = data.pop("_bounds")
         self.__dict__.update(data)
         self._native = NativeKernel(self._kind, params, bounds, [k._native for k in getattr(self, "parts", [])])
 

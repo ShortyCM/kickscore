@@ -50,6 +50,8 @@ def kernels():
         'add_exp': ks.kernel.Constant(0.7) + ks.kernel.Exponential(0.8, 1.7),
         'add32': ks.kernel.Constant(0.7) + ks.kernel.Matern32(0.8, 1.7),
         'add52': ks.kernel.Constant(0.7) + ks.kernel.Matern52(0.8, 1.7),
+        'add_matern_pair': ks.kernel.Matern32(0.3, 1.1) + ks.kernel.Matern52(0.4, 2.1),
+        'add_all_matern': ks.kernel.Exponential(0.2, 1.7) + ks.kernel.Matern32(0.3, 1.1) + ks.kernel.Matern52(0.4, 2.1),
         'add_general': ks.kernel.Constant(0.7) + ks.kernel.Matern32(0.3, 1.1) + ks.kernel.Matern52(0.4, 2.1) + ks.kernel.Matern52(0.2, 0.9),
     }
 

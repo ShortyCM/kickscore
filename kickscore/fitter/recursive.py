@@ -22,5 +22,5 @@ class RecursiveFitter(Fitter):
         if name == "_h":
             return self.kernel.measurement_vector
         if name == "_I":
-            return np.eye(self.kernel.order)
+            return np.asarray(self._native.identity())
         raise AttributeError(name)

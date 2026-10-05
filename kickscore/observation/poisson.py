@@ -25,7 +25,7 @@ class PoissonObservation(Observation):
     _count = scalar("p")
 
     def __init__(self, items, count, t):
-        super().__init__(items, t, count)
+        self._initialize(items, t, count)
 
     @staticmethod
     def probability(items, count, t):
@@ -39,7 +39,7 @@ class SkellamObservation(Observation):
     _base_rate = scalar("q")
 
     def __init__(self, items, diff, base_rate, t):
-        super().__init__(items, t, diff, base_rate)
+        self._initialize(items, t, diff, base_rate)
 
     @staticmethod
     def probability(items, diff, base_rate, t):

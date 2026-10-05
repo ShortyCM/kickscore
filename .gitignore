@@ -10,5 +10,3 @@
 /.venv-reference/
 /reference-*.json
 /native-*.json
-
-/legacy-pickles.pkl

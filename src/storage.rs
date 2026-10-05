@@ -8,6 +8,13 @@ impl<T> Array<T> {
     pub fn new() -> Self { Self::from_vec(Vec::new()) }
 }
 impl<T: Clone> Array<T> {
+    pub fn reserve(&mut self, additional: usize) {
+        if Rc::strong_count(&self.data) > 1 {
+            self.data = Rc::new(UnsafeCell::new(self.deref().clone()));
+        }
+        unsafe { &mut *self.data.get() }.reserve(additional);
+    }
+
     pub fn push(&mut self, value: T) {
         if Rc::strong_count(&self.data) > 1 {
             self.data = Rc::new(UnsafeCell::new(self.deref().clone()));
@@ -38,7 +45,12 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Array<T> {
 #[pyclass(unsendable)]
 pub struct ArrayView { storage: ViewStorage }
 enum ViewStorage { Float(Rc<UnsafeCell<Vec<f64>>>), Integer(Rc<UnsafeCell<Vec<i64>>>) }
-impl Array<f64> { pub fn view(&self) -> ArrayView { ArrayView { storage: ViewStorage::Float(self.data.clone()) } } }
+impl Array<f64> {
+    pub fn prepare_output(&mut self, n: usize) {
+        if Rc::strong_count(&self.data) > 1 { self.data = Rc::new(UnsafeCell::new(vec![0.0; n])); }
+        else { unsafe { &mut *self.data.get() }.resize(n, 0.0); }
+    }
+    pub fn view(&self) -> ArrayView { ArrayView { storage: ViewStorage::Float(self.data.clone()) } } }
 impl Array<i64> { pub fn view(&self) -> ArrayView { ArrayView { storage: ViewStorage::Integer(self.data.clone()) } } }
 #[pymethods]
 impl ArrayView {

@@ -25,7 +25,10 @@ class Observation(metaclass=abc.ABCMeta):
     def probability(*args, **kwargs):
         pass
 
-    def __init__(self, elems, t, p=0.0, q=0.0):
+    def __init__(self, elems, t):
+        self._initialize(elems, t)
+
+    def _initialize(self, elems, t, p=0.0, q=0.0):
         self._items = np.asarray([item for item, coeff in elems], dtype=object)
         self._M = len(elems)
         self._native = NativeObservation([item.fitter._native for item, coeff in elems], [float(coeff) for item, coeff in elems], self._kind, p, q, t)
@@ -62,13 +65,7 @@ class Observation(metaclass=abc.ABCMeta):
 
     def __setstate__(self, data):
         data = dict(data)
-        if "_state" in data:
-            values, arrays = data.pop("_state")
-        else:
-            p = data.pop("_margin", data.pop("_diff", data.pop("_count", 0.0)))
-            q = data.pop("_var", data.pop("_base_rate", 0.0))
-            values = (p, q, data.pop("t"), data.pop("_logpart"), data.pop("_exp_ll"))
-            arrays = [np.asarray(data.pop(name)).tolist() for name in ("_coeffs", "_indices", "_ns_cav", "_xs_cav")]
+        values, arrays = data.pop("_state")
         self.__dict__.update(data)
         p, q, t, logpart, exp_ll = values
         coeffs, indices, nc, xc = arrays

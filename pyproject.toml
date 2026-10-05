@@ -59,7 +59,7 @@ dev = [
 [tool.maturin]
 module-name = "kickscore._native"
 python-source = "."
-include = ["tests/**", "validation/**", "RUST_PORT.md"]
+include = [{ path = "tests/**", format = "sdist" }, { path = "validation/**", format = "sdist" }, { path = "RUST_PORT.md", format = "sdist" }]
 
 [tool.ruff]
 line-length = 100  # Default is 88.

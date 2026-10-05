@@ -12,7 +12,7 @@ class GaussianObservation(Observation):
     _var = scalar("q")
 
     def __init__(self, items, diff, var, t):
-        super().__init__(items, t, diff, var)
+        self._initialize(items, t, diff, var)
 
     @staticmethod
     def probability(items, threshold, var, t):

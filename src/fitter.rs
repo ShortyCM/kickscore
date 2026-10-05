@@ -5,58 +5,125 @@ use serde::{Deserialize,Serialize};
 use std::{cell::RefCell,rc::Rc,collections::HashMap};
 
 pub type FRef=Rc<RefCell<FData>>;
+#[derive(Default)]
+pub struct AllocationCache {
+    prior:HashMap<usize,Mat>,
+    steps:HashMap<(usize,u64),(Mat,Mat)>,
+}
 #[derive(Serialize,Deserialize)]
 pub struct FData{
     pub kernel:KRef,pub batch:bool,pub fitted:bool,pub ts:Array<f64>,pub pending:Array<f64>,pub ms:Array<f64>,pub vs:Array<f64>,pub ns:Array<f64>,pub xs:Array<f64>,
     pub h:Mat,pub a:History,pub q:History,pub mp:History,pub pp:History,pub mf:History,pub pf:History,pub sm:History,pub sp:History,
+    #[serde(skip)]
+    pub work:crate::inference::Workspace,
     pub km:Mat,pub cov:Mat,pub chol:Mat,pub wi:Mat,pub wv:Mat,
 }
 impl FData{
-    pub fn new(kernel:KRef,batch:bool)->PyResult<Self>{let h=if batch{Mat::zero(0,1)}else{kernel.borrow().h()?};let n=h.n;Ok(Self{kernel,batch,fitted:true,ts:Array::new(),pending:Array::new(),ms:Array::new(),vs:Array::new(),ns:Array::new(),xs:Array::new(),h,a:History::new(n,n),q:History::new(n,n),mp:History::new(n,1),pp:History::new(n,n),mf:History::new(n,1),pf:History::new(n,n),sm:History::new(n,1),sp:History::new(n,n),km:Mat::zero(0,0),cov:Mat::zero(0,0),chol:Mat::zero(0,0),wi:Mat::zero(0,0),wv:Mat::zero(0,1)})}
+    pub fn new(kernel:KRef,batch:bool)->PyResult<Self>{let h=if batch{Mat::zero(0,1)}else{kernel.borrow().h()?};let n=h.n;Ok(Self{kernel,batch,fitted:true,ts:Array::new(),pending:Array::new(),ms:Array::new(),vs:Array::new(),ns:Array::new(),xs:Array::new(),h,a:History::new(n,n),q:History::new(n,n),mp:History::new(n,1),pp:History::new(n,n),mf:History::new(n,1),pf:History::new(n,n),sm:History::new(n,1),sp:History::new(n,n),work:crate::inference::Workspace::default(),km:Mat::zero(0,0),cov:Mat::zero(0,0),chol:Mat::zero(0,0),wi:Mat::zero(0,0),wv:Mat::zero(0,1)})}
     pub fn add(&mut self,t:f64)->usize{let i=self.ts.len()+self.pending.len();self.pending.push(t);self.fitted=false;i}
-    pub fn allocate(&mut self)->PyResult<()>{self.allocate_cached(&mut HashMap::new())}
-    pub fn allocate_cached(&mut self,cache:&mut HashMap<(usize,u64),(Mat,Mat)>)->PyResult<()>{
-        if self.pending.is_empty() && !self.batch{return Ok(());}
+    pub fn allocate(&mut self)->PyResult<()>{self.allocate_cached(&mut AllocationCache::default())}
+    pub fn allocate_cached(&mut self,cache:&mut AllocationCache)->PyResult<()> {
+        if self.pending.is_empty()&&!self.batch {return Ok(());}
+        let additional=self.pending.len();
+        for values in [&mut self.ts,&mut self.ms,&mut self.vs,&mut self.ns,&mut self.xs] {
+            values.reserve(additional);
+        }
         let k=self.kernel.borrow();
         let stationary=fn_stationary(&k);
+        let kernel_key=Rc::as_ptr(&self.kernel) as usize;
+        if !self.batch {
+            for history in [&mut self.a,&mut self.q,&mut self.mp,&mut self.pp,&mut self.mf,&mut self.pf,&mut self.sm,&mut self.sp] {
+                history.v.reserve(additional*history.n*history.m);
+            }
+            if stationary&&!cache.prior.contains_key(&kernel_key) {
+                cache.prior.insert(kernel_key,k.matrix("state",self.pending[0],self.pending[0])?);
+            }
+        }
         for &t in self.pending.iter() {
-            self.ms.push(0.0);self.vs.push(k.cov(t,t));self.ns.push(0.0);self.xs.push(0.0);
-            if !self.batch {let n=self.h.n;let p=k.matrix("state",t,t)?;self.mp.push(Mat::zero(n,1));self.mf.push(Mat::zero(n,1));self.sm.push(Mat::zero(n,1));self.pp.push(p.clone());self.pf.push(p.clone());self.sp.push(p);
-                if let Some(&prev)=self.ts.last(){let key=(Rc::as_ptr(&self.kernel) as usize,(t-prev).to_bits());let(a,q)=if stationary {if let Some(step)=cache.get(&key){step.clone()}else{let step=(k.matrix("transition",prev,t)?,k.matrix("noise",prev,t)?);if cache.len()>=1024{cache.clear();}cache.insert(key,step.clone());step}}else{(k.matrix("transition",prev,t)?,k.matrix("noise",prev,t)?)};self.a.push(a);self.q.push(q);}
-            } self.ts.push(t);
+            self.ms.push(0.0);
+            self.vs.push(k.diag(t));
+            self.ns.push(0.0);
+            self.xs.push(0.0);
+            if !self.batch {
+                let prior;
+                let p=if stationary {&cache.prior[&kernel_key]} else {
+                    prior=k.matrix("state",t,t)?;
+                    &prior
+                };
+                self.mp.push_zero();
+                self.mf.push_zero();
+                self.sm.push_zero();
+                self.pp.push(p);
+                self.pf.push(p);
+                self.sp.push(p);
+                if let Some(&prev)=self.ts.last() {
+                    if stationary {
+                        let key=(kernel_key,(t-prev).to_bits());
+                        if !cache.steps.contains_key(&key) {
+                            let step=(k.matrix("transition",prev,t)?,k.matrix("noise",prev,t)?);
+                            if cache.steps.len()>=1024 {cache.steps.clear();}
+                            cache.steps.insert(key,step);
+                        }
+                        let(a,q)=&cache.steps[&key];
+                        self.a.push(a);
+                        self.q.push(q);
+                    } else {
+                        self.a.push(&k.matrix("transition",prev,t)?);
+                        self.q.push(&k.matrix("noise",prev,t)?);
+                    }
+                }
+            }
+            self.ts.push(t);
         }
         self.pending.clear();
-        if self.batch {let n=self.ts.len();self.km=Mat::zero(n,n);for i in 0..n{for j in 0..n{self.km[(i,j)]=k.cov(self.ts[i],self.ts[j]);}}}
+        if self.batch {
+            let n=self.ts.len();
+            self.km.resize(n,n);
+            for i in 0..n {for j in 0..n {self.km[(i,j)]=k.cov(self.ts[i],self.ts[j]);}}
+        }
         Ok(())
     }
     pub fn fit(&mut self)->PyResult<()>{
         if !self.pending.is_empty(){return Err(PyRuntimeError::new_err("new data since last call to `allocate()`"));}
         let n=self.ts.len();if n==0{self.fitted=true;return Ok(());}
-        if self.batch{
-            let mut b=Mat::eye(n);let mut diag=Mat::zero(n,n);for i in 0..n{diag[(i,i)]=self.xs[i].sqrt();for j in 0..n{b[(i,j)]+=self.xs[i].sqrt()*self.xs[j].sqrt()*self.km[(i,j)];}}
-            self.chol=b.cholesky()?;let mat=self.chol.lower_solve(&diag);self.wi=mat.transpose().mul(&mat);let wik=self.wi.mul(&self.km);self.cov=self.km.sub(&self.km.mul(&wik));let ns=Mat::from(n,1,&self.ns);let m=self.cov.mul(&ns);self.ms=Array::from_vec(m.v.to_vec());self.vs=Array::from_vec((0..n).map(|i|self.cov[(i,i)]).collect());self.wv=ns.sub(&wik.mul(&ns));
-        }else{
-            let h=&self.h;let ht=h.transpose();let id=Mat::eye(h.n);
-            for i in 0..n{
-                if i>0{self.mp.set(i,self.a.get(i-1).mul(&self.mf.get(i-1)));self.pp.set(i,self.a.get(i-1).mul(&self.pf.get(i-1)).mul(&self.a.get(i-1).transpose()).add(&self.q.get(i-1)));}
-                let gain=self.pp.get(i).mul(h).scale(1.0/(1.0+self.xs[i]*self.pp.get(i).quad(h)));self.mf.set(i,self.mp.get(i).add(&gain.scale(self.ns[i]-self.xs[i]*ht.mul(&self.mp.get(i)).v[0])));let z=id.sub(&gain.mul(&ht).scale(self.xs[i]));self.pf.set(i,z.mul(&self.pp.get(i)).mul(&z.transpose()).add(&gain.mul(&gain.transpose()).scale(self.xs[i])));
-            }
-            for i in (0..n).rev(){if i==n-1{self.sm.set(i,self.mf.get(i).clone());self.sp.set(i,self.pf.get(i).clone());}else{let g=self.pp.get(i+1).solve(&self.a.get(i).mul(&self.pf.get(i)))?.transpose();self.sm.set(i,self.mf.get(i).add(&g.mul(&self.sm.get(i+1).sub(&self.mp.get(i+1)))));self.sp.set(i,self.pf.get(i).add(&g.mul(&self.sp.get(i+1).sub(&self.pp.get(i+1))).mul(&g.transpose())));}self.ms[i]=ht.mul(&self.sm.get(i)).v[0];self.vs[i]=self.sp.get(i).quad(h);}
-        }self.fitted=true;Ok(())
+        if self.batch { crate::inference::batch(self)?; }
+        else { crate::inference::recursive(self)?; }
+        self.fitted=true;Ok(())
     }
     pub fn ready(&self)->PyResult<()>{if !self.fitted{Err(PyRuntimeError::new_err("new data since last call to `fit()`"))}else{Ok(())}}
     pub fn predict(&self,t:f64)->PyResult<(f64,f64)>{
-        self.ready()?;let k=self.kernel.borrow();let n=self.ts.len();if n==0{return Ok((0.0,k.cov(t,t)));}
-        if self.batch{let row=Mat::from(1,n,&self.ts.iter().map(|s|k.cov(t,*s)).collect::<Vec<_>>());return Ok((row.mul(&self.wv).v[0],k.cov(t,t)-row.mul(&self.wi).mul(&row.transpose()).v[0]));}
-        let nxt=self.ts.partition_point(|s|*s<t);let h=&self.h;let ht=h.transpose();
-        if nxt==n{let a=k.matrix("transition",self.ts[n-1],t)?;let q=k.matrix("noise",self.ts[n-1],t)?;return Ok((ht.mul(&a).mul(&self.sm.get(n-1)).v[0],a.mul(&self.sp.get(n-1)).mul(&a.transpose()).add(&q).quad(h)));}
+        self.ready()?;let k=self.kernel.borrow();let n=self.ts.len();if n==0{return Ok((0.0,k.diag(t)));}
+        if self.batch{let row=Mat::from(1,n,&self.ts.iter().map(|s|k.cov(t,*s)).collect::<Vec<_>>());return Ok((row.mul(&self.wv).v[0],k.diag(t)-row.mul(&self.wi).mul(&row.transpose()).v[0]));}
+        let nxt=crate::matrix::search_left(&self.ts,t);let h=&self.h;let ht=h.transpose();
+        if nxt==n{let a=k.matrix("transition",self.ts[n-1],t)?;let q=k.matrix("noise",self.ts[n-1],t)?;return Ok((ht.mul(&a.mul(&self.sm.get(n-1))).v[0],a.mul(&self.sp.get(n-1)).mul(&a.transpose()).add(&q).quad(h)));}
         let(m,p)=if nxt==0{(Mat::zero(h.n,1),k.matrix("state",t,t)?)}else{let a=k.matrix("transition",self.ts[nxt-1],t)?;let q=k.matrix("noise",self.ts[nxt-1],t)?;(a.mul(&self.mf.get(nxt-1)),a.mul(&self.pf.get(nxt-1)).mul(&a.transpose()).add(&q))};
         let a=k.matrix("transition",t,self.ts[nxt])?;let g=self.pp.get(nxt).solve(&a.mul(&p))?.transpose();Ok((ht.mul(&m.add(&g.mul(&self.sm.get(nxt).sub(&self.mp.get(nxt))))).v[0],p.add(&g.mul(&self.sp.get(nxt).sub(&self.pp.get(nxt))).mul(&g.transpose())).quad(h)))
     }
     pub fn likelihood(&self,kl:bool)->PyResult<f64>{
         if kl && self.batch{return Err(PyNotImplementedError::new_err(""));}self.ready()?;let n=self.ts.len();if n==0{return Ok(0.0);}
-        if self.batch{return Ok(-(0..n).map(|i|self.chol[(i,i)].ln()).sum::<f64>()+0.5*self.ns.iter().zip(self.ms.iter()).map(|(a,b)|a*b).sum::<f64>());}
-        let mut val=0.0;for i in 0..n{let m=self.h.transpose().mul(&self.mp.get(i)).v[0];let v=self.pp.get(i).quad(&self.h);let x=self.xs[i];let u=self.ns[i];val+=if kl{-0.5*((x*v+1.0).ln()+x*(m*m-self.ms[i]*self.ms[i]-self.vs[i])-2.0*u*(m-self.ms[i])-(x*m-u).powi(2)/(1.0/v+x))}else{-0.5*((x*v+1.0).ln()+(-u*u*v-2.0*u*m+x*m*m)/(x*v+1.0))};}Ok(val)
+        if self.batch {
+            let mut quadratic=0.0;
+            for i in 0..n {
+                let mut value=0.0;
+                for j in 0..n {value+=self.cov[(i,j)]*self.ns[j];}
+                quadratic+=self.ns[i]*value;
+            }
+            return Ok(-(0..n).map(|i|self.chol[(i,i)].ln()).sum::<f64>()+0.5*quadratic);
+        }
+        let mut val=0.0;
+        let dim=self.h.n;
+        for i in 0..n {
+            let m=crate::linalg::dot(&self.h.v,&self.mp.v[i*dim..(i+1)*dim]);
+            let v=crate::linalg::quadratic(&self.pp.v[i*dim*dim..(i+1)*dim*dim],&self.h.v);
+            let x=self.xs[i];let u=self.ns[i];let argument=x*v+1.0;
+            if argument<=0.0{return Err(PyValueError::new_err("math domain error"));}
+            val+=if kl {
+                let ms=crate::linalg::dot(&self.h.v,&self.sm.v[i*dim..(i+1)*dim]);
+                let vs=crate::linalg::quadratic(&self.sp.v[i*dim*dim..(i+1)*dim*dim],&self.h.v);
+                -0.5*(argument.ln()+x*(m*m-ms*ms-vs)-2.0*u*(m-ms)-(x*m-u).powi(2)/(1.0/v+x))
+            } else {-0.5*(argument.ln()+(-u*u*v-2.0*u*m+x*m*m)/argument)};
+        }
+        Ok(val)
     }
     pub fn array(&self,name:&str)->PyResult<&Vec<f64>>{Ok(match name{"ts"=>&self.ts,"ts_new"=>&self.pending,"ms"=>&self.ms,"vs"=>&self.vs,"ns"=>&self.ns,"xs"=>&self.xs,_=>return Err(PyValueError::new_err("unknown array"))})}
 }
@@ -80,18 +147,8 @@ impl NativeFitter{
     fn set_array(&self,name:&str,v:Vec<f64>)->PyResult<()>{let mut f=self.inner.borrow_mut();if name!="ts_new" && v.len()!=f.ts.len(){return Err(PyValueError::new_err("array length must match allocated samples"));}match name{"ts"=>f.ts=Array::from_vec(v),"ts_new"=>f.pending=Array::from_vec(v),"ms"=>f.ms=Array::from_vec(v),"vs"=>f.vs=Array::from_vec(v),"ns"=>f.ns=Array::from_vec(v),"xs"=>f.xs=Array::from_vec(v),_=>return Err(PyValueError::new_err("unknown array"))}Ok(())}
     fn predict(&self,ts:Vec<f64>)->PyResult<(Vec<f64>,Vec<f64>)>{let f=self.inner.borrow();f.ready()?;let mut m=Vec::with_capacity(ts.len());let mut v=Vec::with_capacity(ts.len());for t in ts{let(a,b)=f.predict(t)?;m.push(a);v.push(b);}Ok((m,v))}
     fn likelihood(&self,kl:bool)->PyResult<f64>{self.inner.borrow().likelihood(kl)}
+    fn identity(&self)->Vec<Vec<f64>>{Mat::eye(self.inner.borrow().h.n).rows()}
     fn matrices(&self,name:&str)->PyResult<Vec<Vec<Vec<f64>>>>{let f=self.inner.borrow();let a=match name{"_A"=>&f.a,"_Q"=>&f.q,"_m_p"=>&f.mp,"_P_p"=>&f.pp,"_m_f"=>&f.mf,"_P_f"=>&f.pf,"_m_s"=>&f.sm,"_P_s"=>&f.sp,_=>return Err(PyValueError::new_err("unknown state"))};Ok(a.rows())}
-    fn set_matrix(&self,name:&str,values:Vec<Vec<f64>>)->PyResult<()> {
-        let mut f=self.inner.borrow_mut();let n=values.len();let m=values.first().map_or(0,Vec::len);
-        if values.iter().any(|r|r.len()!=m){return Err(PyValueError::new_err("ragged matrix"));}
-        let matrix=Mat::from(n,m,&values.into_iter().flatten().collect::<Vec<_>>());
-        match name{"_k_mat"=>f.km=matrix,"_cov"=>f.cov=matrix,"_b_cholesky"=>f.chol=matrix,"_woodbury_inv"=>f.wi=matrix,"_woodbury_vec"=>f.wv=matrix,_=>return Err(PyValueError::new_err("unknown matrix"))}Ok(())
-    }
-    fn set_history(&self,name:&str,values:Vec<Vec<f64>>)->PyResult<()> {
-        let mut f=self.inner.borrow_mut();let history=match name{"_A"=>&mut f.a,"_Q"=>&mut f.q,"_m_p"=>&mut f.mp,"_P_p"=>&mut f.pp,"_m_f"=>&mut f.mf,"_P_f"=>&mut f.pf,"_m_s"=>&mut f.sm,"_P_s"=>&mut f.sp,_=>return Err(PyValueError::new_err("unknown state"))};
-        if values.iter().any(|v|v.len()!=history.n*history.m){return Err(PyValueError::new_err("invalid state dimensions"));}
-        history.v=values.into_iter().flatten().collect();Ok(())
-    }
     fn dump(&self)->PyResult<Vec<u8>>{bincode::serialize(&*self.inner.borrow()).map_err(|e|PyValueError::new_err(e.to_string()))}
     fn restore(&self,data:Vec<u8>,kernel:PyRef<'_,NativeKernel>)->PyResult<()>{let mut f:FData=bincode::deserialize(&data).map_err(|e|PyValueError::new_err(e.to_string()))?;f.kernel=kernel.inner.clone();*self.inner.borrow_mut()=f;Ok(())}
 }

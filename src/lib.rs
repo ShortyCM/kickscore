@@ -1,6 +1,8 @@
 mod random;
 mod storage;
 mod matrix;
+mod linalg;
+mod inference;
 mod kernel;
 mod moments;
 mod fitter;

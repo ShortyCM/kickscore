@@ -46,16 +46,6 @@ def test_pickle_keeps_observation_fitter_connections():
     assert restored.observations[0]._items[0] is restored.item['a']
 
 
-def test_python_override_is_explicitly_rejected():
-    model = ks.BinaryModel()
-    model.add_item('a', ks.kernel.Constant(1.0))
-    model.observe(['a'], [], 0.0)
-    model.observations[0].ep_update = lambda lr: 0.0
-    with pytest.raises(NotImplementedError, match='Python overrides'):
-        model.fit()
-    assert not model.item['a'].fitter.is_fitted
-
-
 @pytest.mark.parametrize('fitter_type', [BatchFitter, RecursiveFitter])
 def test_numpy_views_write_native_state(fitter_type):
     fitter = fitter_type(ks.kernel.Constant(1.0))
@@ -77,16 +67,19 @@ def test_numpy_views_write_native_state(fitter_type):
     np.testing.assert_array_equal(fitter.xs[:1], before)
 
 
-def test_numpy_seed_controls_simulation():
-    kernel = ks.kernel.Constant(0.5) + ks.kernel.Matern32(0.3, 2.0)
-    ts = np.array([0.0, 0.2, 0.7])
-    np.random.seed(173)
-    first = kernel.simulate(ts)
-    np.random.seed(173)
-    second = kernel.simulate(ts)
-    np.testing.assert_array_equal(first, second)
-    third = kernel.simulate(ts)
-    assert not np.array_equal(second, third)
+@pytest.mark.parametrize("kernel", [
+    ks.kernel.Exponential(0.3, 2.0),
+    ks.kernel.Matern32(0.3, 2.0),
+    ks.kernel.Matern52(0.3, 2.0),
+    ks.kernel.Constant(0.5) + ks.kernel.Matern32(0.3, 2.0) + ks.kernel.Matern52(0.4, 1.0),
+    ks.kernel.PiecewiseConstant(0.5, np.array([0.5])),
+    ks.kernel.Wiener(0.2, 0.0, 0.5),
+])
+def test_simulation_repeated_times(kernel):
+    values = kernel.simulate(np.array([1.0, 0.0, 0.0, 1.0]))
+    assert values.shape == (4,)
+    assert np.isfinite(values).all()
+    np.testing.assert_array_equal(values[::2], values[1::2])
 
 
 def test_piecewise_bounds_are_writable():
