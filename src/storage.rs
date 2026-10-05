@@ -10,14 +10,14 @@ impl<T> Array<T> {
 impl<T: Clone> Array<T> {
     pub fn reserve(&mut self, additional: usize) {
         if Rc::strong_count(&self.data) > 1 {
-            self.data = Rc::new(UnsafeCell::new(self.deref().clone()));
+            self.data = Rc::new(UnsafeCell::new(self.deref().to_vec()));
         }
         unsafe { &mut *self.data.get() }.reserve(additional);
     }
 
     pub fn push(&mut self, value: T) {
         if Rc::strong_count(&self.data) > 1 {
-            self.data = Rc::new(UnsafeCell::new(self.deref().clone()));
+            self.data = Rc::new(UnsafeCell::new(self.deref().to_vec()));
         }
         unsafe { &mut *self.data.get() }.push(value);
     }
@@ -27,7 +27,7 @@ impl<T: Clone> Array<T> {
     }
 }
 impl<T: Clone> Clone for Array<T> {
-    fn clone(&self) -> Self { Self::from_vec(self.deref().clone()) }
+    fn clone(&self) -> Self { Self::from_vec(self.deref().to_vec()) }
 }
 impl<T> Deref for Array<T> {
     type Target = Vec<T>;
