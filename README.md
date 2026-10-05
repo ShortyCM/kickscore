@@ -1,3 +1,5 @@
+This branch uses a Rust computational core exposed through PyO3 and packaged with Maturin. See [RUST_PORT.md](RUST_PORT.md) for release builds on Windows and Linux and staged local validation.
+
 # kickscore
 
 [![Build package](https://github.com/lucasmaystre/kickscore/actions/workflows/build.yml/badge.svg)](https://github.com/lucasmaystre/kickscore/actions/workflows/build.yml)

@@ -1,12 +1,8 @@
 import abc
 from collections.abc import Sequence
-from math import isfinite
 from typing import Any, Literal
 
-import numpy as np
-
-from .fitter import Fitter, RecursiveFitter
-from .fitter._kernel_cache import KernelCache
+from ._native import NativeModel
 from .item import Item
 from .kernel import Kernel
 from .observation import (
@@ -19,15 +15,31 @@ from .observation import (
     ProbitWinObservation,
     SkellamObservation,
 )
-from .observation._batch import ObservationBatch
 
 
 class Model(metaclass=abc.ABCMeta):
     def __init__(self):
         self._item: dict[str, Item] = dict()
-        self.last_t: float = -float("inf")
+        self._native = NativeModel()
         self.observations: list[Observation] = list()
-        self._last_method: Literal["ep", "kl"] | None = None  # Last method used to fit the model.
+        self._last_method: Literal["ep", "kl"] | None = None
+
+    @property
+    def _last_method(self):
+        return self._native.get_method()
+
+    @_last_method.setter
+    def _last_method(self, value):
+        self._native.set_method(value)
+
+    def _get_parameter(self):
+        return self._native.parameter
+
+    def _set_parameter(self, value):
+        self._native.parameter = value
+
+    def _outcomes(self, elems, t, kind, p=0.0, q=0.0, ternary=False):
+        return tuple(self._native.outcomes([item.fitter._native for item, coeff in elems], [float(coeff) for item, coeff in elems], t, kind, p, q, ternary))
 
     @property
     def item(self) -> dict[str, Item]:
@@ -42,6 +54,7 @@ class Model(metaclass=abc.ABCMeta):
         if name in self._item:
             raise ValueError("item '{}' already added".format(name))
         self._item[name] = Item(kernel=kernel, fitter=fitter)
+        self._native.register_fitter(self._item[name].fitter._native)
 
     @abc.abstractmethod
     def observe(self, *args: Any, **kwargs: Any) -> None:
@@ -55,56 +68,45 @@ class Model(metaclass=abc.ABCMeta):
         max_iter: int = 100,
         verbose: bool = False,
     ) -> bool:
-        if method == "ep":
-            update = lambda obs: obs.ep_update(lr=lr)
-        elif method == "kl":
-            update = lambda obs: obs.kl_update(lr=lr)
-        else:
+        if method not in ("ep", "kl"):
             raise ValueError("'method' should be one of: 'ep', 'kl'")
         self._last_method = method
-        fitters: list[Fitter] = [item.fitter for item in self._item.values()]
-        caches: dict[int, KernelCache] = {}
-        try:
-            for fitter in fitters:
-                if type(fitter) is RecursiveFitter:
-                    key = id(fitter.kernel)
-                    if key not in caches:
-                        caches[key] = KernelCache(fitter.kernel)
-                    fitter._allocate(caches[key])
-                else:
-                    fitter.allocate()
-            caches.clear()
-            batch = ObservationBatch.create(self.observations, fitters)
-            for i in range(max_iter):
-                for fitter in fitters:
-                    if not all(
-                        np.isfinite(a).all() for a in (fitter.ms, fitter.vs, fitter.ns, fitter.xs)
-                    ) or np.any(fitter.vs <= 0):
-                        raise FloatingPointError("invalid score distribution or pseudo-observation")
-                max_diff = 0.0
-                if batch is not None:
-                    max_diff = batch.update(method, lr)
-                else:
-                    for obs in self.observations:
-                        diff = update(obs)
-                        if not isfinite(diff):
-                            raise FloatingPointError("non-finite convergence difference")
-                        max_diff = max(max_diff, diff)
-                for fitter in fitters:
-                    fitter.fit()
-                    if not (np.isfinite(fitter.ms).all() and np.isfinite(fitter.vs).all()):
-                        raise FloatingPointError("non-finite fitted score distribution")
-                    if np.any(fitter.vs <= 0):
-                        raise FloatingPointError("non-positive fitted score variance")
-                if verbose:
-                    print("iteration {}, max diff: {:.5f}".format(i + 1, max_diff), flush=True)
-                if max_diff < tol:
-                    return True
-            return False
-        except Exception:
-            for fitter in fitters:
-                fitter.is_fitted = False
-            raise
+        return self._native.fit(method, lr, tol, max_iter, verbose)
+
+    def _record(self, obs):
+        self._native.append_observation(obs._native)
+        self.observations.append(obs)
+
+    @property
+    def last_t(self):
+        return self._native.last_t
+
+    @last_t.setter
+    def last_t(self, value):
+        self._native.last_t = value
+
+    def __getstate__(self):
+        data = dict(self.__dict__)
+        data.pop("_native")
+        data["_saved_last_method"] = self._last_method
+        data["_saved_parameter"] = self._native.parameter
+        data["_saved_last_t"] = self.last_t
+        return data
+
+    def __setstate__(self, data):
+        data = dict(data)
+        last_t = data.pop("_saved_last_t")
+        parameter = data.pop("_saved_parameter")
+        method = data.pop("_saved_last_method")
+        self.__dict__.update(data)
+        self._native = NativeModel()
+        self._native.parameter = parameter
+        self.last_t = last_t
+        self._last_method = method
+        for item in self.item.values():
+            self._native.register_fitter(item.fitter._native)
+        for obs in self.observations:
+            self._native.append_observation(obs._native)
 
     @abc.abstractmethod
     def probabilities(self, *args: Any, **kwargs: Any) -> Any:
@@ -112,14 +114,7 @@ class Model(metaclass=abc.ABCMeta):
 
     @property
     def log_likelihood(self) -> float:
-        """Estimate of log-marginal likelihood of the model."""
-        if self._last_method == "ep":
-            contrib = lambda x: x.ep_log_likelihood_contrib
-        else:  # self._last_method == "kl"
-            contrib = lambda x: x.kl_log_likelihood_contrib
-        return sum(contrib(o) for o in self.observations) + sum(
-            contrib(i.fitter) for i in self.item.values()
-        )
+        return self._native.likelihood()
 
     def process_items(
         self,
@@ -140,7 +135,6 @@ class Model(metaclass=abc.ABCMeta):
         figsize: float | None = None,
         timestamps: bool = False,
     ) -> Any:
-        # Delayed import in order to avoid a hard dependency on Matplotlib.
         from .plotting import plot_scores
 
         return plot_scores(self, items, resolution, figsize, timestamps)
@@ -166,7 +160,7 @@ class BinaryModel(Model):
             raise ValueError("observations must be added in chronological order")
         elems = self.process_items(winners, sign=+1) + self.process_items(losers, sign=-1)
         obs = self._win_obs(elems, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -176,11 +170,12 @@ class BinaryModel(Model):
         t: float,
     ) -> tuple[float, float]:
         elems = self.process_items(team1, sign=+1) + self.process_items(team2, sign=-1)
-        prob = self._win_obs.probability(elems, t)
-        return (prob, 1 - prob)
+        return self._outcomes(elems, t, self._win_obs._kind)
 
 
 class TernaryModel(Model):
+    margin = property(Model._get_parameter, Model._set_parameter)
+
     def __init__(self, margin: float = 0.1, obs_type: Literal["probit", "logit"] = "probit"):
         super().__init__()
         if obs_type == "probit":
@@ -210,7 +205,7 @@ class TernaryModel(Model):
             obs = self._tie_obs(elems, t=t, margin=margin)
         else:
             obs = self._win_obs(elems, t=t, margin=margin)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -223,12 +218,12 @@ class TernaryModel(Model):
         if margin is None:
             margin = self.margin
         elems = self.process_items(team1, sign=+1) + self.process_items(team2, sign=-1)
-        prob1 = self._win_obs.probability(elems, t, margin)
-        prob2 = self._tie_obs.probability(elems, t, margin)
-        return (prob1, prob2, 1 - prob1 - prob2)
+        return self._outcomes(elems, t, self._win_obs._kind, margin, ternary=True)
 
 
 class DifferenceModel(Model):
+    var = property(Model._get_parameter, Model._set_parameter)
+
     def __init__(self, var: float = 1.0):
         super().__init__()
         self.var = var
@@ -247,7 +242,7 @@ class DifferenceModel(Model):
             var = self.var
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
         obs = GaussianObservation(items, diff, var, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -261,8 +256,7 @@ class DifferenceModel(Model):
         if var is None:
             var = self.var
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
-        prob = GaussianObservation.probability(items, threshold, var, t=t)
-        return (prob, 1 - prob)
+        return self._outcomes(items, t, GaussianObservation._kind, threshold, var)
 
 
 class CountModel(Model):
@@ -279,7 +273,7 @@ class CountModel(Model):
             raise ValueError("observations must be added in chronological order")
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
         obs = PoissonObservation(items, count, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -289,16 +283,12 @@ class CountModel(Model):
         t: float = 0.0,
     ) -> tuple[float, ...]:
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
-        probs: list[float] = []
-        cumulative = 0.0
-        while cumulative < 0.999:
-            prob = PoissonObservation.probability(items, count=len(probs), t=t)
-            probs.append(prob)
-            cumulative += prob
-        return tuple(probs)
+        return tuple(self._native.count_probabilities([item.fitter._native for item, coeff in items], [float(coeff) for item, coeff in items], t, False, 0.0))
 
 
 class CountDiffModel(Model):
+    _base_rate = property(Model._get_parameter, Model._set_parameter)
+
     def __init__(self, base_rate: float = 0.0):
         super().__init__()
         self._base_rate = base_rate
@@ -314,7 +304,7 @@ class CountDiffModel(Model):
             raise ValueError("observations must be added in chronological order")
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
         obs = SkellamObservation(items, diff, self._base_rate, t=t)
-        self.observations.append(obs)
+        self._record(obs)
         self.last_t = t
 
     def probabilities(
@@ -324,16 +314,4 @@ class CountDiffModel(Model):
         t: float = 0.0,
     ) -> tuple[float, ...]:
         items = self.process_items(items1, sign=+1) + self.process_items(items2, sign=-1)
-        k = 0
-        center = SkellamObservation.probability(items, k, self._base_rate, t=t)
-        negative: list[float] = []
-        positive: list[float] = []
-        cumulative = center
-        while cumulative < 0.999:
-            k += 1
-            pos_prob = SkellamObservation.probability(items, k, self._base_rate, t=t)
-            neg_prob = SkellamObservation.probability(items, -k, self._base_rate, t=t)
-            positive.append(pos_prob)
-            negative.append(neg_prob)
-            cumulative += pos_prob + neg_prob
-        return (*reversed(negative), center, *positive)
+        return tuple(self._native.count_probabilities([item.fitter._native for item, coeff in items], [float(coeff) for item, coeff in items], t, True, self._base_rate))

@@ -31,8 +31,6 @@ classifiers = [
 ]
 dependencies = [
     "numpy",
-    "scipy",
-    "numba",
 ]
 
 [project.optional-dependencies]
@@ -47,8 +45,8 @@ Repository = "https://github.com/lucasmaystre/kickscore.git"
 Issues = "https://github.com/lucasmaystre/kickscore/issues"
 
 [build-system]
-requires = ["uv_build>=0.7.19,<0.8.0"]
-build-backend = "uv_build"
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
 
 [dependency-groups]
 dev = [
@@ -58,13 +56,10 @@ dev = [
     "ruff>=0.12.8",
 ]
 
-[tool.uv.build-backend]
-module-name = "kickscore"
-module-root = ""
-source-include = [
-    "tests/**",
-    "examples/*.ipynb",
-]
+[tool.maturin]
+module-name = "kickscore._native"
+python-source = "."
+include = [{ path = "tests/**", format = "sdist" }, { path = "validation/**", format = "sdist" }, { path = "RUST_PORT.md", format = "sdist" }]
 
 [tool.ruff]
 line-length = 100  # Default is 88.

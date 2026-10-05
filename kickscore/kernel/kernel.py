@@ -1,153 +1,90 @@
 import abc
 
 import numpy as np
-import scipy as sp
-from numpy.typing import NDArray
-from scipy.linalg import block_diag
+
+from .._native import NativeKernel
+
+
+def parameter(index):
+    return property(lambda self: self._native.get_param(index), lambda self, value: self._native.set_param(index, float(value)))
 
 
 class Kernel(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def k_mat(self, ts1: NDArray, ts2: NDArray | None = None) -> NDArray:
-        """Compute the covariance matrix."""
+    def __init__(self):
+        pass
 
-    @abc.abstractmethod
-    def k_diag(self, ts: NDArray) -> NDArray:
-        """Compute the variances (diagonal of the covariance matrix)."""
+    def k_mat(self, ts1, ts2=None):
+        first = np.asarray(ts1, dtype=float).tolist()
+        second = first if ts2 is None else np.asarray(ts2, dtype=float).tolist()
+        return np.asarray(self._native.k_mat(first, second)).reshape(len(first), len(second))
 
-    @property
-    @abc.abstractmethod
-    def order(self) -> int:
-        """Order of the SDE :math:`m`."""
-
-    @abc.abstractmethod
-    def state_mean(self, t: float) -> NDArray:
-        r"""Prior mean of the state vector, :math:`\mathbf{m}_0(t)`."""
-
-    @abc.abstractmethod
-    def state_cov(self, t: float) -> NDArray:
-        r"""Prior covariance of the state vector, :math:`\mathbf{P}_0(t)`."""
+    def k_diag(self, ts):
+        return np.asarray(self._native.k_diag(np.asarray(ts, dtype=float).tolist()))
 
     @property
-    @abc.abstractmethod
-    def measurement_vector(self) -> NDArray:
-        r"""Measurement vector :math:`\mathbf{h}`."""
+    def order(self):
+        return self._native.order()
+
+    def state_mean(self, t):
+        return np.asarray(self._native.mean())
+
+    def state_cov(self, t):
+        return np.asarray(self._native.matrix("state", t, t))
 
     @property
-    @abc.abstractmethod
-    def feedback(self) -> NDArray:
-        r"""Feedback matrix :math:`\mathbf{F}`."""
+    def measurement_vector(self):
+        return np.asarray(self._native.h())
 
     @property
-    @abc.abstractmethod
-    def noise_effect(self) -> NDArray:
-        r"""Noise effect matrix :math:`\mathbf{L}`."""
+    def feedback(self):
+        return np.asarray(self._native.matrix("feedback", 0.0, 0.0))
 
     @property
-    @abc.abstractmethod
-    def noise_density(self) -> NDArray:
-        r"""Power spectral density of the noise :math:`\mathbf{Q}`."""
-        # Note: usually a scalar, except for combination kernels (e.g., Add).
+    def noise_effect(self):
+        return np.asarray(self._native.matrix("effect", 0.0, 0.0))
 
-    def transition(self, t1: float, t2: float) -> NDArray:
-        r"""Transition matrix :math:`\mathbf{A}` for a given time interval.
+    @property
+    def noise_density(self):
+        return np.asarray(self._native.matrix("density", 0.0, 0.0))
 
-        Note that this default implementation assumes that the feedback matrix
-        is independent of time.
-        """
-        F = self.feedback
-        return sp.linalg.expm(F * (t2 - t1))
+    def transition(self, t1, t2):
+        return np.asarray(self._native.matrix("transition", t1, t2))
 
-    def noise_cov(self, t1: float, t2: float) -> NDArray:
-        r"""Noise covariance matrix :math:`\mathbf{Q}` for a given time interval.
+    def noise_cov(self, t1, t2):
+        return np.asarray(self._native.matrix("noise", t1, t2))
 
-        Note that this default implementations assumes that the feedback
-        matrix, the noise density and the noise effect are independent of time.
-        """
-        # Solution via matrix fraction decomposition, see:
-        # - <https://github.com/SheffieldML/GPy/blob/devel/GPy/models/state_space.py#L715>
-        # - Särkka's thesis (2006).
-        mat = self.noise_effect.dot(self.noise_density).dot(self.noise_effect.T)
-        Phi = np.vstack(
-            (np.hstack((self.feedback, mat)), np.hstack((np.zeros_like(mat), -self.feedback.T)))
-        )
-        m = self.order
-        AB = np.dot(sp.linalg.expm(Phi * (t2 - t1)), np.eye(2 * m, m, k=-m))
-        return sp.linalg.solve(AB[m:, :].T, AB[:m, :].T)
-
-    def __add__(self, other: "Kernel") -> "Kernel":
+    def __add__(self, other):
         return Add(self, other)
 
     @staticmethod
-    def distances(ts1: NDArray, ts2: NDArray) -> NDArray:
-        # mat[i, j] = |ts1[i] - ts2[j]|
-        return np.abs(ts1[:, np.newaxis] - ts2[np.newaxis, :])
+    def distances(ts1, ts2):
+        from .._native import distances
+        return np.asarray(distances(np.asarray(ts1, dtype=float).tolist(), np.asarray(ts2, dtype=float).tolist())).reshape(len(ts1), len(ts2))
 
-    def simulate(self, ts: NDArray) -> NDArray:
-        """Sample from a Gaussian process with the corresponding kernel."""
-        ts = np.sort(ts)
-        xs = np.zeros((len(ts), self.order))
-        mean = self.state_mean(ts[0])
-        cov = self.state_cov(ts[0])
-        xs[0, :] = np.random.multivariate_normal(mean, cov)
-        for i in range(1, len(ts)):
-            mean = np.dot(self.transition(ts[i - 1], ts[i]), xs[i - 1])
-            cov = self.noise_cov(ts[i - 1], ts[i])
-            xs[i, :] = np.random.multivariate_normal(mean, cov)
-        return np.dot(xs, self.measurement_vector)
+    def simulate(self, ts):
+        return np.asarray(self._native.simulate(np.asarray(ts, dtype=float).tolist()))
+
+    def __getstate__(self):
+        data = dict(self.__dict__)
+        data.pop("_native")
+        data["_params"] = [self._native.get_param(i) for i in range(self._nparams)]
+        data["_bounds"] = self._native.bounds()
+        return data
+
+    def __setstate__(self, data):
+        params = data.pop("_params")
+        bounds = data.pop("_bounds")
+        self.__dict__.update(data)
+        self._native = NativeKernel(self._kind, params, bounds, [k._native for k in getattr(self, "parts", [])])
 
 
 class Add(Kernel):
-    def __init__(self, first: Kernel, second: Kernel):
-        self.parts: list[Kernel] = list()
-        for k in (first, second):
-            if isinstance(k, Add):
-                self.parts.extend(k.parts)
-            else:
-                self.parts.append(k)
+    _kind = "add"
+    _nparams = 0
 
-    def k_mat(self, ts1: NDArray, ts2: NDArray | None = None) -> NDArray:
-        return sum(k.k_mat(ts1, ts2) for k in self.parts)  # pyright: ignore[reportReturnType]
-
-    def k_diag(self, ts: NDArray) -> NDArray:
-        return sum(k.k_diag(ts) for k in self.parts)  # pyright: ignore[reportReturnType]
-
-    @property
-    def order(self) -> int:
-        return sum(k.order for k in self.parts)
-
-    def transition(self, t1: float, t2: float) -> NDArray:
-        mats = [k.transition(t1, t2) for k in self.parts]
-        return block_diag(*mats)
-
-    def noise_cov(self, t1: float, t2: float) -> NDArray:
-        mats = [k.noise_cov(t1, t2) for k in self.parts]
-        return block_diag(*mats)
-
-    def state_mean(self, t: float) -> NDArray:
-        vecs = [k.state_mean(t) for k in self.parts]
-        return np.concatenate(vecs)
-
-    def state_cov(self, t: float) -> NDArray:
-        mats = [k.state_cov(t) for k in self.parts]
-        return block_diag(*mats)
-
-    @property
-    def measurement_vector(self) -> NDArray:
-        vecs = [k.measurement_vector for k in self.parts]
-        return np.concatenate(vecs)
-
-    @property
-    def feedback(self) -> NDArray:
-        mats = [k.feedback for k in self.parts]
-        return block_diag(*mats)
-
-    @property
-    def noise_effect(self) -> NDArray:
-        mats = [k.noise_effect for k in self.parts]
-        return block_diag(*mats)
-
-    @property
-    def noise_density(self) -> NDArray:
-        mats = [k.noise_density for k in self.parts]
-        return block_diag(*mats)
+    def __init__(self, first, second):
+        self.parts = []
+        for kernel in (first, second):
+            self.parts.extend(kernel.parts if isinstance(kernel, Add) else [kernel])
+        self._native = NativeKernel("add", [], [], [k._native for k in self.parts])
